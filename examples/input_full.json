@@ -1,0 +1,14 @@
+{
+  "ip": "198.51.100.1",
+  "ssh_port": 22,
+  "ssh_user": "root",
+  "ssh_pass": "your_secure_password_here",
+  "ipv6": "2001:db8:85a3::8a2e:370:7334",
+  "domain": "node.yourdomain.com",
+  "ipv6_domain": "ipv6.yourdomain.com",
+  "client_isp": "unicom",
+  "client_ip": "203.0.113.50",
+  "client_location": "East Asia Regional Metro",
+  "output_dir": "./output/198.51.100.1",
+  "lang": "en"
+}

@@ -1,0 +1,125 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VPS Multi-Protocol Deployment API",
+    "description": "Automates multi-protocol VPS deployment, SSL certificate issuance, and Clash subscription generation.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.yourdomain.com/v1"
+    }
+  ],
+  "paths": {
+    "/deploy": {
+      "post": {
+        "operationId": "deployVPS",
+        "summary": "Deploy 3X-UI, configure Hy2/Reality/CF protocols, and generate Clash subscriptions",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deployment successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DeployRequest": {
+        "type": "object",
+        "required": ["ip", "ssh_pass"],
+        "properties": {
+          "ip": {
+            "type": "string",
+            "description": "Server IPv4 address"
+          },
+          "ssh_port": {
+            "type": "integer",
+            "default": 22,
+            "description": "SSH port"
+          },
+          "ssh_user": {
+            "type": "string",
+            "default": "root",
+            "description": "SSH username"
+          },
+          "ssh_pass": {
+            "type": "string",
+            "description": "SSH password"
+          },
+          "ipv6": {
+            "type": "string",
+            "description": "Server IPv6 address"
+          },
+          "domain": {
+            "type": "string",
+            "description": "IPv4 domain configured with Cloudflare proxy"
+          },
+          "ipv6_domain": {
+            "type": "string",
+            "description": "IPv6 domain configured with Cloudflare proxy"
+          },
+          "client_isp": {
+            "type": "string",
+            "enum": ["unicom", "mobile", "telecom", "overseas"],
+            "default": "unicom",
+            "description": "User client ISP"
+          },
+          "client_ip": {
+            "type": "string",
+            "description": "Client outbound IP"
+          },
+          "client_location": {
+            "type": "string",
+            "description": "Client geographic location"
+          },
+          "lang": {
+            "type": "string",
+            "enum": ["en", "zh"],
+            "default": "en"
+          }
+        }
+      },
+      "DeployResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "dashboard_url": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "onepage_subscription_url": {
+            "type": "string"
+          },
+          "report_path": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
