@@ -44,7 +44,7 @@
     "schemas": {
       "DeployRequest": {
         "type": "object",
-        "required": ["ip", "ssh_pass"],
+        "required": ["ip"],
         "properties": {
           "ip": {
             "type": "string",
@@ -62,7 +62,11 @@
           },
           "ssh_pass": {
             "type": "string",
-            "description": "SSH password"
+            "description": "SSH password (root password, default authentication)"
+          },
+          "ssh_key": {
+            "type": "string",
+            "description": "Path to SSH private key (optional alternative to ssh_pass)"
           },
           "ipv6": {
             "type": "string",

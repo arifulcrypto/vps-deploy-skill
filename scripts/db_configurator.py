@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 3X-UI SQLite Database Provisioner:
-Generates self-contained Python script to inject multi-protocol inbounds
-(VLESS-WS-TLS 443, Hysteria 2 UDP, VLESS-Reality TCP) with dynamic randomized ports
-and adaptive schema handling.
+Builds non-destructive, injection-safe Python payloads to configure
+multi-protocol inbounds (Hysteria 2, VLESS-Reality, VLESS-WS) into /etc/x-ui/x-ui.db.
 """
+import base64
 import json
-import time
 from typing import Dict, Any, Optional
 
 
@@ -28,38 +27,60 @@ def generate_remote_sqlite_script(
     reality_sni: str = "addons.mozilla.org",
 ) -> str:
     """
-    Generate Python code to execute on the remote VPS for 3X-UI configuration.
+    Generate a Python script that injects inbounds safely using a Base64-encoded JSON payload.
+    Immune to format string bugs, quotes, backslashes, and shell interpolation.
     """
-    script = f'''# Auto-generated 3X-UI dynamic multi-protocol injection script
+    payload_data = {
+        "client_uuid": client_uuid,
+        "sub_id": sub_id,
+        "email": email,
+        "password": password,
+        "hy2_port": int(hy2_port),
+        "reality_port": int(reality_port),
+        "cf_port": int(cf_port),
+        "domain": domain or "",
+        "cert_path": cert_path or "",
+        "key_path": key_path or "",
+        "obfs_password": obfs_password,
+        "reality_privkey": reality_privkey,
+        "reality_pubkey": reality_pubkey,
+        "reality_shortid": reality_shortid,
+        "reality_sni": reality_sni,
+    }
+
+    payload_b64 = base64.b64encode(json.dumps(payload_data).encode("utf-8")).decode("utf-8")
+
+    # Static remote script (no f-string interpolation of user input)
+    template = '''# -*- coding: utf-8 -*-
 import sqlite3
 import json
 import time
+import base64
+
+PAYLOAD_B64 = "''' + payload_b64 + '''"
+cfg = json.loads(base64.b64decode(PAYLOAD_B64).decode("utf-8"))
 
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
 c = conn.cursor()
 
-client_uuid = "{client_uuid}"
-sub_id = "{sub_id}"
-email = "{email}"
-password = "{password}"
-hy2_port = {hy2_port}
-reality_port = {reality_port}
-cf_port = {cf_port}
-domain = "{domain if domain else ''}"
-cert_path = "{cert_path if cert_path else ''}"
-key_path = "{key_path if key_path else ''}"
-obfs_pass = "{obfs_password}"
-reality_privkey = "{reality_privkey}"
-reality_pubkey = "{reality_pubkey}"
-reality_shortid = "{reality_shortid}"
-reality_sni = "{reality_sni}"
+client_uuid = cfg["client_uuid"]
+sub_id = cfg["sub_id"]
+email = cfg["email"]
+password = cfg["password"]
+hy2_port = cfg["hy2_port"]
+reality_port = cfg["reality_port"]
+cf_port = cfg["cf_port"]
+domain = cfg["domain"]
+cert_path = cfg["cert_path"]
+key_path = cfg["key_path"]
+obfs_pass = cfg["obfs_password"]
+reality_privkey = cfg["reality_privkey"]
+reality_pubkey = cfg["reality_pubkey"]
+reality_shortid = cfg["reality_shortid"]
+reality_sni = cfg["reality_sni"]
 now_ms = int(time.time() * 1000)
 
-# Check table schema dynamically
-inbounds_cols = [col[1] for col in c.execute('PRAGMA table_info(inbounds)').fetchall()]
-has_exclude_from_sub = 'exclude_from_sub' in inbounds_cols
-
-# 1. Mount SSL certificates and enable subscription features
+# 1. Update settings if certificates exist
 if cert_path and key_path:
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', ?)", (cert_path,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', ?)", (key_path,))
@@ -69,55 +90,108 @@ if cert_path and key_path:
 c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subEnable', 'true')")
 c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subClashEnable', 'true')")
 
-# 2. Insert or update Client in clients table
-c.execute("""
-INSERT OR REPLACE INTO clients (
-    id, email, sub_id, uuid, password, auth, flow, security, reverse,
-    limit_ip, limit_hwid, total_gb, expiry_time, enable, tg_id, group_name,
-    comment, reset, reset_day, reset_weekday, reset_max, traffic_reset,
-    traffic_reset_day, created_at, updated_at, sync_orphaned_at
-) VALUES (
-    1, ?, ?, ?, ?, ?, '', 'auto', '',
-    0, 0, 0, 0, 1, 0, '',
-    '', 0, 0, 0, 0, 'never',
-    1, ?, ?, 0
-)
-""", (email, sub_id, client_uuid, password, password, now_ms, now_ms))
+# Check table existence and columns dynamically
+existing_tables = [t[0] for t in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
-def insert_inbound(inb_id, port, protocol, tag, remark, settings_str, stream_str):
-    if has_exclude_from_sub:
-        c.execute("""
-        INSERT OR REPLACE INTO inbounds (
-            id, user_id, up, down, total, remark, sub_sort_index, exclude_from_sub,
-            enable, expiry_time, traffic_reset, traffic_reset_day, last_traffic_reset_time,
-            listen, port, protocol, settings, stream_settings, tag, sniffing,
-            node_id, share_addr_strategy, share_addr, disable_flow, origin_node_guid
-        ) VALUES (
-            ?, 1, 0, 0, 0, ?, ?, 0,
-            1, 0, 'never', 1, 0,
-            '', ?, ?, ?, ?, ?, '{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"routeOnly":false}',
-            NULL, 'node', '', 0, ''
-        )
-        """, (inb_id, remark, inb_id, port, protocol, settings_str, stream_str, tag))
+client_id = 1
+if 'clients' in existing_tables:
+    clients_cols = [col[1] for col in c.execute('PRAGMA table_info(clients)').fetchall()]
+    row = c.execute("SELECT id FROM clients WHERE uuid = ? OR sub_id = ?", (client_uuid, sub_id)).fetchone()
+    if row:
+        client_id = row[0]
+        c.execute("UPDATE clients SET email = ?, password = ?, auth = ?, updated_at = ? WHERE id = ?",
+                  (email, password, password, now_ms, client_id))
     else:
-        c.execute("""
-        INSERT OR REPLACE INTO inbounds (
-            id, user_id, up, down, total, remark, sub_sort_index,
-            enable, expiry_time, traffic_reset, traffic_reset_day, last_traffic_reset_time,
-            listen, port, protocol, settings, stream_settings, tag, sniffing,
-            node_id, share_addr_strategy, share_addr, disable_flow, origin_node_guid
-        ) VALUES (
-            ?, 1, 0, 0, 0, ?, ?,
-            1, 0, 'never', 1, 0,
-            '', ?, ?, ?, ?, ?, '{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"routeOnly":false}',
-            NULL, 'node', '', 0, ''
-        )
-        """, (inb_id, remark, inb_id, port, protocol, settings_str, stream_str, tag))
+        max_client_id = c.execute("SELECT coalesce(max(id), 0) FROM clients").fetchone()[0]
+        client_id = max_client_id + 1
+        
+        # Build dynamic insert for clients
+        col_values = {
+            'id': client_id,
+            'email': email,
+            'sub_id': sub_id,
+            'uuid': client_uuid,
+            'password': password,
+            'auth': password,
+            'flow': '',
+            'security': 'auto',
+            'reverse': '',
+            'limit_ip': 0,
+            'limit_hwid': 0,
+            'total_gb': 0,
+            'expiry_time': 0,
+            'enable': 1,
+            'tg_id': 0,
+            'group_name': '',
+            'comment': '',
+            'reset': 0,
+            'reset_day': 0,
+            'reset_weekday': 0,
+            'reset_max': 0,
+            'traffic_reset': 'never',
+            'traffic_reset_day': 1,
+            'created_at': now_ms,
+            'updated_at': now_ms,
+            'sync_orphaned_at': 0
+        }
+        insert_cols = [col for col in clients_cols if col in col_values]
+        placeholders = ', '.join(['?'] * len(insert_cols))
+        vals = [col_values[col] for col in insert_cols]
+        c.execute(f"INSERT INTO clients ({', '.join(insert_cols)}) VALUES ({placeholders})", vals)
 
-# 3. Inbound 1: Port cf_port (443) VLESS-WS-TLS (for Cloudflare CDN & Clean IPs)
+def upsert_inbound(tag, port, protocol, remark, settings_str, stream_str):
+    inbounds_cols = [col[1] for col in c.execute('PRAGMA table_info(inbounds)').fetchall()]
+    row = c.execute("SELECT id FROM inbounds WHERE tag = ?", (tag,)).fetchone()
+    if row:
+        inb_id = row[0]
+        c.execute("""
+            UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, enable = 1
+            WHERE id = ?
+        """, (port, protocol, remark, settings_str, stream_str, inb_id))
+    else:
+        max_id = c.execute("SELECT coalesce(max(id), 0) FROM inbounds").fetchone()[0]
+        inb_id = max_id + 1
+        col_values = {
+            'id': inb_id,
+            'user_id': 1,
+            'up': 0,
+            'down': 0,
+            'total': 0,
+            'remark': remark,
+            'sub_sort_index': inb_id,
+            'exclude_from_sub': 0,
+            'enable': 1,
+            'expiry_time': 0,
+            'traffic_reset': 'never',
+            'traffic_reset_day': 1,
+            'last_traffic_reset_time': 0,
+            'listen': '',
+            'port': port,
+            'protocol': protocol,
+            'settings': settings_str,
+            'stream_settings': stream_str,
+            'tag': tag,
+            'sniffing': json.dumps({"enabled": True, "destOverride": ["http", "tls", "quic", "fakedns"], "routeOnly": False}),
+            'node_id': None,
+            'share_addr_strategy': 'node',
+            'share_addr': '',
+            'disable_flow': 0,
+            'origin_node_guid': ''
+        }
+        insert_cols = [col for col in inbounds_cols if col in col_values]
+        placeholders = ', '.join(['?'] * len(insert_cols))
+        vals = [col_values[col] for col in insert_cols]
+        c.execute(f"INSERT INTO inbounds ({', '.join(insert_cols)}) VALUES ({placeholders})", vals)
+
+    if 'client_inbounds' in existing_tables:
+        c.execute("INSERT OR REPLACE INTO client_inbounds (client_id, inbound_id, flow_override, created_at) VALUES (?, ?, '', ?)",
+                  (client_id, inb_id, now_ms))
+    return inb_id
+
+# 3. Inbound 1: Port 443 VLESS-WS-TLS (if domain provided)
 if domain and cert_path and key_path:
-    vless_settings = json.dumps({{
-        "clients": [{{
+    vless_settings = json.dumps({
+        "clients": [{
             "id": client_uuid,
             "flow": "",
             "email": email,
@@ -135,14 +209,14 @@ if domain and cert_path and key_path:
             "trafficResetDay": 1,
             "created_at": now_ms,
             "updated_at": now_ms
-        }}],
+        }],
         "decryption": "none"
-    }}, indent=2)
+    }, indent=2)
 
-    vless_stream = json.dumps({{
+    vless_stream = json.dumps({
         "network": "ws",
         "security": "tls",
-        "tlsSettings": {{
+        "tlsSettings": {
             "serverName": domain,
             "minVersion": "1.2",
             "maxVersion": "1.3",
@@ -150,27 +224,27 @@ if domain and cert_path and key_path:
             "rejectUnknownSni": False,
             "disableSystemRoot": False,
             "enableSessionResumption": False,
-            "certificates": [{{
+            "certificates": [{
                 "ocspStapling": 0,
                 "oneTimeLoading": False,
                 "usage": "encipherment",
                 "buildChain": False,
                 "certificateFile": cert_path,
                 "keyFile": key_path
-            }}],
+            }],
             "alpn": ["http/1.1"]
-        }},
-        "wsSettings": {{
+        },
+        "wsSettings": {
             "acceptProxyProtocol": False,
             "path": "/ws",
-            "headers": {{}}
-        }}
-    }})
-    insert_inbound(1, cf_port, 'vless', f'in-{{cf_port}}-vless', f'VPS-CF-VLESS-{{cf_port}}', vless_settings, vless_stream)
+            "headers": {}
+        }
+    })
+    upsert_inbound("vps-skill-cf-vless", cf_port, "vless", f"VPS-CF-VLESS-{cf_port}", vless_settings, vless_stream)
 
-# 4. Inbound 2: Port hy2_port UDP Hysteria 2
-hy2_settings = json.dumps({{
-    "clients": [{{
+# 4. Inbound 2: Hysteria 2
+hy2_settings = json.dumps({
+    "clients": [{
         "id": client_uuid,
         "auth": password,
         "password": password,
@@ -183,37 +257,37 @@ hy2_settings = json.dumps({{
         "trafficResetDay": 1,
         "created_at": now_ms,
         "updated_at": now_ms
-    }}],
+    }],
     "version": 2
-}}, indent=2)
+}, indent=2)
 
-hy2_tls_certs = [{{
+hy2_tls_certs = [{
     "ocspStapling": 0,
     "oneTimeLoading": False,
     "usage": "encipherment",
     "buildChain": False,
     "certificateFile": cert_path,
     "keyFile": key_path
-}}] if (cert_path and key_path) else []
+}] if (cert_path and key_path) else []
 
-hy2_stream = json.dumps({{
+hy2_stream = json.dumps({
     "network": "hysteria",
-    "hysteriaSettings": {{
+    "hysteriaSettings": {
         "version": 2,
         "udpIdleTimeout": 60,
-        "masquerade": {{
+        "masquerade": {
             "type": "",
             "dir": "",
             "url": "",
             "rewriteHost": False,
             "insecure": False,
             "content": "",
-            "headers": {{}},
+            "headers": {},
             "statusCode": 0
-        }}
-    }},
-    "security": "tls",
-    "tlsSettings": {{
+        }
+    },
+    "security": "tls" if (cert_path and key_path) else "none",
+    "tlsSettings": {
         "serverName": domain if domain else "localhost",
         "minVersion": "1.2",
         "maxVersion": "1.3",
@@ -223,15 +297,15 @@ hy2_stream = json.dumps({{
         "enableSessionResumption": False,
         "certificates": hy2_tls_certs,
         "alpn": ["h3"]
-    }},
-    "finalmask": {{
-        "udp": [{{
+    },
+    "finalmask": {
+        "udp": [{
             "type": "salamander",
-            "settings": {{
+            "settings": {
                 "password": obfs_pass
-            }}
-        }}],
-        "quicParams": {{
+            }
+        }],
+        "quicParams": {
             "congestion": "bbr",
             "debug": False,
             "initStreamReceiveWindow": 8388608,
@@ -242,14 +316,14 @@ hy2_stream = json.dumps({{
             "keepAlivePeriod": 10,
             "disablePathMTUDiscovery": False,
             "maxIncomingStreams": 1024
-        }}
-    }}
-}})
-insert_inbound(2, hy2_port, 'hysteria', f'in-{{hy2_port}}-hy2', f'VPS-Direct-Hy2-{{hy2_port}}', hy2_settings, hy2_stream)
+        }
+    }
+})
+upsert_inbound("vps-skill-hy2", hy2_port, "hysteria", f"VPS-Direct-Hy2-{hy2_port}", hy2_settings, hy2_stream)
 
-# 5. Inbound 3: Port reality_port TCP VLESS-Reality
-reality_settings = json.dumps({{
-    "clients": [{{
+# 5. Inbound 3: VLESS-Reality
+reality_settings = json.dumps({
+    "clients": [{
         "id": client_uuid,
         "flow": "xtls-rprx-vision",
         "email": email,
@@ -261,27 +335,27 @@ reality_settings = json.dumps({{
         "trafficResetDay": 1,
         "created_at": now_ms,
         "updated_at": now_ms
-    }}],
+    }],
     "decryption": "none",
     "encryption": "none"
-}}, indent=2)
+}, indent=2)
 
-reality_stream = json.dumps({{
+reality_stream = json.dumps({
     "network": "tcp",
-    "tcpSettings": {{
+    "tcpSettings": {
         "acceptProxyProtocol": False,
-        "header": {{
+        "header": {
             "type": "none"
-        }}
-    }},
+        }
+    },
     "security": "reality",
-    "realitySettings": {{
+    "realitySettings": {
         "show": False,
         "xver": 0,
-        "target": f"{{reality_sni}}:443",
+        "target": f"{reality_sni}:443",
         "serverNames": [
             reality_sni,
-            f"services.{{reality_sni}}",
+            f"services.{reality_sni}",
             reality_sni.replace("www.", "")
         ],
         "privateKey": reality_privkey,
@@ -292,25 +366,18 @@ reality_stream = json.dumps({{
             reality_shortid,
             "1a2b3c4d"
         ],
-        "settings": {{
+        "settings": {
             "publicKey": reality_pubkey,
             "fingerprint": "chrome",
             "serverName": "",
             "spiderX": ""
-        }}
-    }}
-}})
-insert_inbound(3, reality_port, 'vless', f'in-{{reality_port}}-reality', f'VPS-Direct-Reality-{{reality_port}}', reality_settings, reality_stream)
-
-# 6. Associate client with inbounds
-for inb_id in [1, 2, 3]:
-    c.execute("""
-    INSERT OR REPLACE INTO client_inbounds (client_id, inbound_id, flow_override, created_at)
-    VALUES (1, ?, '', ?)
-    """, (inb_id, now_ms))
+        }
+    }
+})
+upsert_inbound("vps-skill-reality", reality_port, "vless", f"VPS-Direct-Reality-{reality_port}", reality_settings, reality_stream)
 
 conn.commit()
 conn.close()
-print("SUCCESS: 3X-UI DYNAMIC INBOUNDS CONFIGURED CLEANLY")
+print("SUCCESS: 3X-UI DYNAMIC INBOUNDS CONFIGURED SAFELY WITHOUT OVERWRITING EXISTING ROWS")
 '''
-    return script
+    return template
