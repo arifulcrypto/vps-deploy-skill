@@ -67,3 +67,35 @@ def test_invalid_ipv6():
     with pytest.raises(DeploymentError, match="Invalid IPv6 address format"):
         validate_config(cfg)
 
+
+
+@pytest.mark.parametrize("key,value", [
+    ("domain", "a.com;rm -rf /"),
+    ("domain", "bad domain.com"),
+    ("panel_domain", "$(id).example.com"),
+    ("reality_sni", "x"),
+])
+def test_rejects_shell_sensitive_hostnames(key, value):
+    with pytest.raises(DeploymentError, match=f"Invalid {key}"):
+        validate_config({"ip": "198.51.100.1", "ssh_pass": "x", key: value})
+
+
+@pytest.mark.parametrize("extra,match", [
+    ({"panel_port": 70000}, "Invalid panel_port"),
+    ({"reality_port": 443}, "collides with the HTTPS port"),
+    ({"panel_port": 25000, "reality_port": 25000}, "collides with panel_port"),
+    ({"panel_pass": "short"}, "Invalid panel_pass"),
+    ({"panel_pass": "has space in it"}, "Invalid panel_pass"),
+    ({"panel_base_path": "/a;b/"}, "Invalid panel_base_path"),
+    ({"profile": "nope"}, "Invalid profile"),
+    ({"profile": "reality-self"}, "requires 'domain'"),
+    ({"client_isp": "cable"}, "Invalid client_isp"),
+    ({"xui_version": "latest; id"}, "Invalid xui_version"),
+])
+def test_rejects_invalid_options(extra, match):
+    with pytest.raises(DeploymentError, match=match):
+        validate_config(dict({"ip": "198.51.100.1", "ssh_pass": "x"}, **extra))
+
+
+def test_accepts_reality_self_with_domain():
+    validate_config({"ip": "198.51.100.1", "ssh_pass": "x", "profile": "reality-self", "domain": "WWW.Example.com"})

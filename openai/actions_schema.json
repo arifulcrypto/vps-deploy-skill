@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "VPS Multi-Protocol Deployment API",
-    "description": "Automates multi-protocol VPS deployment, SSL certificate issuance, and Clash subscription generation.",
-    "version": "1.0.0"
+    "title": "VPS Deployment API",
+    "version": "2.0.0",
+    "description": "Wraps scripts/vps_deployer.py. Host this wrapper yourself behind authentication; it handles server credentials."
   },
   "servers": [
     {
@@ -14,7 +14,7 @@
     "/deploy": {
       "post": {
         "operationId": "deployVPS",
-        "summary": "Deploy 3X-UI, configure Hy2/Reality/CF protocols, and generate Clash subscriptions",
+        "summary": "Plan (dry_run) or run a deployment",
         "requestBody": {
           "required": true,
           "content": {
@@ -27,11 +27,26 @@
         },
         "responses": {
           "200": {
-            "description": "Deployment successful",
+            "description": "Deployment or plan result",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeployResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or deployment error (nothing was written locally)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -44,59 +59,114 @@
     "schemas": {
       "DeployRequest": {
         "type": "object",
-        "required": ["ip"],
+        "required": [
+          "ip"
+        ],
         "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          },
           "ip": {
             "type": "string",
             "description": "Server IPv4 address"
           },
           "ssh_port": {
             "type": "integer",
-            "default": 22,
-            "description": "SSH port"
+            "default": 22
           },
           "ssh_user": {
             "type": "string",
-            "default": "root",
-            "description": "SSH username"
+            "default": "root"
           },
           "ssh_pass": {
             "type": "string",
-            "description": "SSH password (root password, default authentication)"
+            "description": "SSH password (or ssh_key)"
           },
           "ssh_key": {
             "type": "string",
-            "description": "Path to SSH private key (optional alternative to ssh_pass)"
+            "description": "Path to an SSH private key on the wrapper host"
           },
-          "ipv6": {
+          "profile": {
             "type": "string",
-            "description": "Server IPv6 address"
+            "enum": [
+              "legacy",
+              "reality-self"
+            ],
+            "default": "legacy"
           },
           "domain": {
             "type": "string",
-            "description": "IPv4 domain configured with Cloudflare proxy"
+            "description": "legacy: Cloudflare-proxied WS domain; reality-self: DNS-only domain (required)"
+          },
+          "ipv6": {
+            "type": "string"
           },
           "ipv6_domain": {
             "type": "string",
-            "description": "IPv6 domain configured with Cloudflare proxy"
+            "description": "legacy only: extra CDN node"
+          },
+          "panel_domain": {
+            "type": "string",
+            "description": "Expose the panel over HTTPS on this DNS-only domain"
+          },
+          "enable_hy2": {
+            "type": "boolean"
+          },
+          "reality_sni": {
+            "type": "string",
+            "description": "legacy REALITY target",
+            "default": "addons.mozilla.org"
           },
           "client_isp": {
             "type": "string",
-            "enum": ["unicom", "mobile", "telecom", "overseas"],
-            "default": "unicom",
-            "description": "User client ISP"
+            "enum": [
+              "unicom",
+              "mobile",
+              "telecom",
+              "overseas"
+            ],
+            "default": "unicom"
           },
           "client_ip": {
-            "type": "string",
-            "description": "Client outbound IP"
+            "type": "string"
           },
           "client_location": {
+            "type": "string"
+          },
+          "node_prefix": {
             "type": "string",
-            "description": "Client geographic location"
+            "default": "srv"
+          },
+          "site_title": {
+            "type": "string"
+          },
+          "xui_version": {
+            "type": "string",
+            "example": "v3.11.0"
+          },
+          "adopt_existing_panel": {
+            "type": "boolean",
+            "default": false
+          },
+          "stop_conflicting_services": {
+            "type": "boolean",
+            "default": false
+          },
+          "rotate_secrets": {
+            "type": "boolean",
+            "default": false
+          },
+          "online_sub": {
+            "type": "boolean",
+            "default": false
           },
           "lang": {
             "type": "string",
-            "enum": ["en", "zh"],
+            "enum": [
+              "en",
+              "zh"
+            ],
             "default": "en"
           }
         }
@@ -105,22 +175,76 @@
         "type": "object",
         "properties": {
           "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "dry_run_success"
+            ]
+          },
+          "profile": {
             "type": "string"
           },
-          "dashboard_url": {
-            "type": "string"
+          "panel": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              },
+              "pass": {
+                "type": "string"
+              },
+              "public": {
+                "type": "boolean"
+              },
+              "tunnel": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "ports": {
+            "type": "object"
           },
           "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "route": {
+                  "type": "string",
+                  "enum": [
+                    "direct",
+                    "cdn"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "online_subscriptions": {
             "type": "array",
             "items": {
               "type": "string"
             }
           },
-          "onepage_subscription_url": {
-            "type": "string"
+          "files": {
+            "type": "object"
           },
-          "report_path": {
-            "type": "string"
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

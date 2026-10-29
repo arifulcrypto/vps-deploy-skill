@@ -1,0 +1,13 @@
+{
+  "ip": "198.51.100.1",
+  "ssh_port": 22,
+  "ssh_user": "root",
+  "ssh_key": "~/.ssh/id_ed25519",
+  "profile": "reality-self",
+  "domain": "www.yourdomain.com",
+  "site_title": "Your Site",
+  "site_description": "Notes, drafts and small projects.",
+  "xui_version": "v3.11.0",
+  "output_dir": "./output/198.51.100.1",
+  "lang": "en"
+}

@@ -1,25 +1,12 @@
 # Gemini / Google Antigravity Skill Guidelines (English)
 
-This document defines the operational runbook when activating the `vps-deployer` skill inside the **Google Antigravity** environment or via the Gemini CLI.
+The skill is auto-discovered from [`.agents/skills/vps-deployer/SKILL.md`](../.agents/skills/vps-deployer/SKILL.md) (a link to the root [`SKILL.md`](../SKILL.md), which is the source of truth).
 
-## In-Session Execution Protocol
-1. **Interactive Extraction**:
-   When the user supplies credentials informally, dynamically extract:
-   - Host IP & Port
-   - Password
-   - Cloudflare-proxied domain (optional)
-   - Domestic outbound IP and carrier (Unicom / Mobile / Telecom)
-2. **Dynamic Non-Fixed Ports**:
-   - Randomize high UDP port for Hysteria 2 (`30000-44999`).
-   - Randomize high TCP port for VLESS-Reality (`20000-29999`).
-   - Randomize high TCP port for 3X-UI web dashboard (`45000-64000`) and randomize base path.
-   - Whitelist the selected ports via remote firewall rules automatically.
-3. **Autonomous Tool Invocations**:
-   - Proactively probe the environment for port conflicts and legacy web servers.
-   - Use `run_command` with `sshpass` to execute commands on the remote VPS.
-   - Run `python3 scripts/vps_deployer.py` directly to handle end-to-end tasks.
-4. **Artifact Generation & Dual Subscriptions**:
-   - Create a dedicated markdown artifact in the session artifact directory (`<appDataDir>/brain/<conversation-id>/`) embedding generated QR code PNG images with `![alt](/absolute/path)`.
-   - Embed file links using markdown link syntax `[file.txt](file:///absolute/path)`.
-   - Output both Primary (OnePage) and Fallback (v1.mk) Clash Verge Rev subscription links.
-   - Default output language is English (`en`).
+## In-session protocol
+1. Extract `ip`, SSH port/user/credentials, optional domain(s) and carrier from the conversation; ask for anything missing.
+2. Choose the profile with the user (`reality-self` needs a DNS-only domain; otherwise `legacy`), write a config JSON, and run `python3 scripts/vps_deployer.py --config <file> --dry-run`. Show the plan and wait for confirmation.
+3. Run the deployment with `run_command`. Do not run ad-hoc `sshpass`/`systemctl`/`pkill` commands against the server and do not edit the panel database yourself.
+4. Opt-in flags (`--adopt-existing-panel`, `--stop-conflicting-services`, `--rotate-secrets`, `--online-sub`) only with explicit user consent.
+5. On success, create a markdown artifact from `result.json` with the panel access, node links and embedded QR images (`![node](/absolute/path/qr_<node>.png)`), and note that it contains credentials. On failure, report the `[ERROR]` line and the SKILL.md troubleshooting entry.
+
+Default output language is English (`en`).

@@ -1,403 +1,326 @@
 #!/usr/bin/env python3
 """
 3X-UI SQLite Database Provisioner:
-Builds non-destructive, injection-safe Python payloads to configure
-multi-protocol inbounds (Hysteria 2, VLESS-Reality, VLESS-WS) into /etc/x-ui/x-ui.db.
+Builds inbound specifications locally and applies them with a static remote script
+(payload via stdin). Ownership is explicit: only rows tagged `vps-skill-*` and the
+client whose email is `vps-skill-<deploy_id>` are ever modified. Port conflicts with
+foreign inbounds abort before any write; the database is backed up first and all
+writes happen in a single transaction.
 """
-import base64
-import json
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+TAG_PREFIX = "vps-skill-"
+DEFAULT_DB_PATH = "/etc/x-ui/x-ui.db"
+
+SNIFFING = {"enabled": True, "destOverride": ["http", "tls", "quic", "fakedns"], "routeOnly": False}
 
 
-def generate_remote_sqlite_script(
-    client_uuid: str,
-    sub_id: str,
-    email: str,
-    password: str,
-    hy2_port: int,
-    reality_port: int,
-    cf_port: int = 443,
-    domain: Optional[str] = None,
-    cert_path: Optional[str] = None,
-    key_path: Optional[str] = None,
-    obfs_password: str = "random_obfs_pass",
-    reality_privkey: str = "",
-    reality_pubkey: str = "",
-    reality_shortid: str = "8c7d6e5a",
-    reality_sni: str = "addons.mozilla.org",
-    panel_domain: Optional[str] = None,
-) -> str:
-    """
-    Generate a Python script that injects inbounds safely using a Base64-encoded JSON payload.
-    Immune to format string bugs, quotes, backslashes, and shell interpolation.
-    """
-    payload_data = {
-        "client_uuid": client_uuid,
-        "sub_id": sub_id,
-        "email": email,
-        "password": password,
-        "hy2_port": int(hy2_port),
-        "reality_port": int(reality_port),
-        "cf_port": int(cf_port),
-        "domain": domain or "",
-        "cert_path": cert_path or "",
-        "key_path": key_path or "",
-        "obfs_password": obfs_password,
-        "reality_privkey": reality_privkey,
-        "reality_pubkey": reality_pubkey,
-        "reality_shortid": reality_shortid,
-        "reality_sni": reality_sni,
-        "panel_domain": panel_domain or "",
-    }
-
-    payload_b64 = base64.b64encode(json.dumps(payload_data).encode("utf-8")).decode("utf-8")
-
-    # Static remote script (no f-string interpolation of user input)
-    template = '''# -*- coding: utf-8 -*-
-import sqlite3
-import json
-import time
-import base64
-
-PAYLOAD_B64 = "''' + payload_b64 + '''"
-cfg = json.loads(base64.b64decode(PAYLOAD_B64).decode("utf-8"))
-
-conn = sqlite3.connect('/etc/x-ui/x-ui.db')
-c = conn.cursor()
-
-client_uuid = cfg["client_uuid"]
-sub_id = cfg["sub_id"]
-email = cfg["email"]
-password = cfg["password"]
-hy2_port = cfg["hy2_port"]
-reality_port = cfg["reality_port"]
-cf_port = cfg["cf_port"]
-domain = cfg["domain"]
-cert_path = cfg["cert_path"]
-key_path = cfg["key_path"]
-obfs_pass = cfg["obfs_password"]
-reality_privkey = cfg["reality_privkey"]
-reality_pubkey = cfg["reality_pubkey"]
-reality_shortid = cfg["reality_shortid"]
-reality_sni = cfg["reality_sni"]
-panel_domain = cfg.get("panel_domain") or ""
-now_ms = int(time.time() * 1000)
-
-# 1. Update settings: Panel defaults strictly to pure IP + HTTP mode unless user explicitly specified a dedicated panel domain
-if panel_domain and cert_path and key_path:
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', ?)", (panel_domain,))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', ?)", (cert_path,))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', ?)", (key_path,))
-else:
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '')")
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '')")
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '')")
-
-# Strictly disable 2FA by default to prevent unexpected user lockout
-c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('twoFactorEnable', 'false')")
-c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('twoFactorToken', '')")
-
-if cert_path and key_path:
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subCertFile', ?)", (cert_path,))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subKeyFile', ?)", (key_path,))
-
-c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subEnable', 'true')")
-c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subClashEnable', 'true')")
-
-# Check table existence and columns dynamically
-existing_tables = [t[0] for t in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-
-client_id = 1
-if 'clients' in existing_tables:
-    clients_cols = [col[1] for col in c.execute('PRAGMA table_info(clients)').fetchall()]
-    row = c.execute("SELECT id FROM clients WHERE uuid = ? OR sub_id = ? OR email = ?", (client_uuid, sub_id, email)).fetchone()
-    if row:
-        client_id = row[0]
-        c.execute("UPDATE clients SET email = ?, uuid = ?, sub_id = ?, password = ?, auth = ?, updated_at = ? WHERE id = ?",
-                  (email, client_uuid, sub_id, password, password, now_ms, client_id))
-    else:
-        max_client_id = c.execute("SELECT coalesce(max(id), 0) FROM clients").fetchone()[0]
-        client_id = max_client_id + 1
-        
-        # Build dynamic insert for clients
-        col_values = {
-            'id': client_id,
-            'email': email,
-            'sub_id': sub_id,
-            'uuid': client_uuid,
-            'password': password,
-            'auth': password,
-            'flow': '',
-            'security': 'auto',
-            'reverse': '',
-            'limit_ip': 0,
-            'limit_hwid': 0,
-            'total_gb': 0,
-            'expiry_time': 0,
-            'enable': 1,
-            'tg_id': 0,
-            'group_name': '',
-            'comment': '',
-            'reset': 0,
-            'reset_day': 0,
-            'reset_weekday': 0,
-            'reset_max': 0,
-            'traffic_reset': 'never',
-            'traffic_reset_day': 1,
-            'created_at': now_ms,
-            'updated_at': now_ms,
-            'sync_orphaned_at': 0
-        }
-        insert_cols = [col for col in clients_cols if col in col_values]
-        placeholders = ', '.join(['?'] * len(insert_cols))
-        vals = [col_values[col] for col in insert_cols]
-        c.execute(f"INSERT INTO clients ({', '.join(insert_cols)}) VALUES ({placeholders})", vals)
-
-def upsert_inbound(tag, port, protocol, remark, settings_str, stream_str):
-    inbounds_cols = [col[1] for col in c.execute('PRAGMA table_info(inbounds)').fetchall()]
-    row = c.execute("SELECT id FROM inbounds WHERE tag = ? OR port = ?", (tag, port)).fetchone()
-    if row:
-        inb_id = row[0]
-        c.execute("""
-            UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, tag = ?, enable = 1
-            WHERE id = ?
-        """, (port, protocol, remark, settings_str, stream_str, tag, inb_id))
-    else:
-        max_id = c.execute("SELECT coalesce(max(id), 0) FROM inbounds").fetchone()[0]
-        inb_id = max_id + 1
-        col_values = {
-            'id': inb_id,
-            'user_id': 1,
-            'up': 0,
-            'down': 0,
-            'total': 0,
-            'remark': remark,
-            'sub_sort_index': inb_id,
-            'exclude_from_sub': 0,
-            'enable': 1,
-            'expiry_time': 0,
-            'traffic_reset': 'never',
-            'traffic_reset_day': 1,
-            'last_traffic_reset_time': 0,
-            'listen': '',
-            'port': port,
-            'protocol': protocol,
-            'settings': settings_str,
-            'stream_settings': stream_str,
-            'tag': tag,
-            'sniffing': json.dumps({"enabled": True, "destOverride": ["http", "tls", "quic", "fakedns"], "routeOnly": False}),
-            'node_id': None,
-            'share_addr_strategy': 'node',
-            'share_addr': '',
-            'disable_flow': 0,
-            'origin_node_guid': ''
-        }
-        insert_cols = [col for col in inbounds_cols if col in col_values]
-        placeholders = ', '.join(['?'] * len(insert_cols))
-        vals = [col_values[col] for col in insert_cols]
-        c.execute(f"INSERT INTO inbounds ({', '.join(insert_cols)}) VALUES ({placeholders})", vals)
-
-    # Disable any other legacy inbounds colliding on the same port
-    c.execute("UPDATE inbounds SET enable = 0 WHERE port = ? AND id != ?", (port, inb_id))
-
-    if 'client_inbounds' in existing_tables:
-        c.execute("INSERT OR REPLACE INTO client_inbounds (client_id, inbound_id, flow_override, created_at) VALUES (?, ?, '', ?)",
-                  (client_id, inb_id, now_ms))
-    return inb_id
-
-# 3. Inbound 1: Port 443 VLESS-WS-TLS (if domain provided)
-if domain and cert_path and key_path:
-    vless_settings = json.dumps({
-        "clients": [{
-            "id": client_uuid,
-            "flow": "",
-            "email": email,
-            "limitIp": 0,
-            "totalGB": 0,
-            "expiryTime": 0,
-            "enable": True,
-            "tgId": 0,
-            "subId": sub_id,
-            "reset": 0,
-            "resetDay": 0,
-            "resetWeekday": 0,
-            "resetMax": 0,
-            "trafficReset": "never",
-            "trafficResetDay": 1,
-            "created_at": now_ms,
-            "updated_at": now_ms
-        }],
-        "decryption": "none"
-    }, indent=2)
-
-    vless_stream = json.dumps({
-        "network": "ws",
-        "security": "tls",
-        "tlsSettings": {
-            "serverName": domain,
-            "minVersion": "1.2",
-            "maxVersion": "1.3",
-            "cipherSuites": "",
-            "rejectUnknownSni": False,
-            "disableSystemRoot": False,
-            "enableSessionResumption": False,
-            "certificates": [{
-                "ocspStapling": 0,
-                "oneTimeLoading": False,
-                "usage": "encipherment",
-                "buildChain": False,
-                "certificateFile": cert_path,
-                "keyFile": key_path
-            }],
-            "alpn": ["http/1.1"]
-        },
-        "wsSettings": {
-            "acceptProxyProtocol": False,
-            "path": "/ws",
-            "headers": {}
-        }
-    })
-    upsert_inbound("vps-skill-cf-vless", cf_port, "vless", f"VPS-CF-VLESS-{cf_port}", vless_settings, vless_stream)
-
-# 4. Inbound 2: Hysteria 2
-hy2_settings = json.dumps({
-    "clients": [{
-        "id": client_uuid,
-        "auth": password,
-        "password": password,
-        "email": email,
-        "enable": True,
-        "expiryTime": 0,
-        "limitIp": 0,
-        "totalGB": 0,
-        "trafficReset": "never",
-        "trafficResetDay": 1,
-        "created_at": now_ms,
-        "updated_at": now_ms
-    }],
-    "version": 2
-}, indent=2)
-
-hy2_tls_certs = [{
-    "ocspStapling": 0,
-    "oneTimeLoading": False,
-    "usage": "encipherment",
-    "buildChain": False,
-    "certificateFile": cert_path,
-    "keyFile": key_path
-}] if (cert_path and key_path) else []
-
-hy2_stream = json.dumps({
-    "network": "hysteria",
-    "hysteriaSettings": {
-        "version": 2,
-        "udpIdleTimeout": 60,
-        "masquerade": {
-            "type": "",
-            "dir": "",
-            "url": "",
-            "rewriteHost": False,
-            "insecure": False,
-            "content": "",
-            "headers": {},
-            "statusCode": 0
-        }
-    },
-    "security": "tls" if (cert_path and key_path) else "none",
-    "tlsSettings": {
-        "serverName": domain if domain else "localhost",
+def _tls_settings(server_name: str, cert_path: str, key_path: str, alpn: List[str]) -> Dict[str, Any]:
+    return {
+        "serverName": server_name,
         "minVersion": "1.2",
         "maxVersion": "1.3",
         "cipherSuites": "",
         "rejectUnknownSni": False,
         "disableSystemRoot": False,
         "enableSessionResumption": False,
-        "certificates": hy2_tls_certs,
-        "alpn": ["h3"]
-    },
-    "finalmask": {
-        "udp": [{
-            "type": "salamander",
-            "settings": {
-                "password": obfs_pass
-            }
+        "certificates": [{
+            "ocspStapling": 0,
+            "oneTimeLoading": False,
+            "usage": "encipherment",
+            "buildChain": False,
+            "certificateFile": cert_path,
+            "keyFile": key_path,
         }],
-        "quicParams": {
-            "congestion": "bbr",
-            "debug": False,
-            "initStreamReceiveWindow": 8388608,
-            "maxStreamReceiveWindow": 8388608,
-            "initConnectionReceiveWindow": 20971520,
-            "maxConnectionReceiveWindow": 20971520,
-            "maxIdleTimeout": 30,
-            "keepAlivePeriod": 10,
-            "disablePathMTUDiscovery": False,
-            "maxIncomingStreams": 1024
-        }
+        "alpn": alpn,
     }
-})
-upsert_inbound("vps-skill-hy2", hy2_port, "hysteria", f"VPS-Direct-Hy2-{hy2_port}", hy2_settings, hy2_stream)
 
-# 5. Inbound 3: VLESS-Reality
-reality_settings = json.dumps({
-    "clients": [{
-        "id": client_uuid,
-        "flow": "xtls-rprx-vision",
-        "email": email,
+
+def _client(identity: Dict[str, str], **extra) -> Dict[str, Any]:
+    entry = {
+        "id": identity["uuid"],
+        "email": identity["email"],
+        "subId": identity["sub_id"],
         "enable": True,
         "expiryTime": 0,
         "limitIp": 0,
         "totalGB": 0,
+        "tgId": 0,
+        "reset": 0,
         "trafficReset": "never",
         "trafficResetDay": 1,
-        "created_at": now_ms,
-        "updated_at": now_ms
-    }],
-    "decryption": "none",
-    "encryption": "none"
-}, indent=2)
-
-reality_stream = json.dumps({
-    "network": "tcp",
-    "tcpSettings": {
-        "acceptProxyProtocol": False,
-        "header": {
-            "type": "none"
-        }
-    },
-    "security": "reality",
-    "realitySettings": {
-        "show": False,
-        "xver": 0,
-        "target": f"{reality_sni}:443",
-        "serverNames": [
-            reality_sni,
-            f"services.{reality_sni}",
-            reality_sni.replace("www.", "")
-        ],
-        "privateKey": reality_privkey,
-        "minClientVer": "",
-        "maxClientVer": "",
-        "maxTimediff": 0,
-        "shortIds": [
-            reality_shortid,
-            "1a2b3c4d"
-        ],
-        "settings": {
-            "publicKey": reality_pubkey,
-            "fingerprint": "chrome",
-            "serverName": "",
-            "spiderX": ""
-        }
     }
-})
-upsert_inbound("vps-skill-reality", reality_port, "vless", f"VPS-Direct-Reality-{reality_port}", reality_settings, reality_stream)
+    entry.update(extra)
+    return entry
 
-# Disable any legacy conflicting inbounds that might reference outdated cert paths
-c.execute("UPDATE inbounds SET enable = 0 WHERE tag NOT IN ('vps-skill-cf-vless', 'vps-skill-hy2', 'vps-skill-reality')")
 
-conn.commit()
-conn.close()
-print("SUCCESS: 3X-UI DYNAMIC INBOUNDS CONFIGURED SAFELY WITHOUT OVERWRITING EXISTING ROWS")
+def ws_inbound(identity, port: int, domain: str, ws_path: str, cert_path: str, key_path: str) -> Dict[str, Any]:
+    return {
+        "tag": f"{TAG_PREFIX}cf-vless",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-cdn-ws",
+        "settings": {"decryption": "none"},
+        "client": _client(identity, flow=""),
+        "stream": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": _tls_settings(domain, cert_path, key_path, ["http/1.1"]),
+            "wsSettings": {"acceptProxyProtocol": False, "path": ws_path, "headers": {}},
+        },
+    }
+
+
+def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path: str,
+                obfs_password: Optional[str]) -> Dict[str, Any]:
+    stream: Dict[str, Any] = {
+        "network": "hysteria",
+        "hysteriaSettings": {
+            "version": 2,
+            "udpIdleTimeout": 60,
+            "masquerade": {"type": "", "dir": "", "url": "", "rewriteHost": False, "insecure": False,
+                           "content": "", "headers": {}, "statusCode": 0},
+        },
+        "security": "tls",
+        "tlsSettings": _tls_settings(server_name, cert_path, key_path, ["h3"]),
+        "finalmask": {
+            "quicParams": {
+                "congestion": "bbr",
+                "debug": False,
+                "initStreamReceiveWindow": 8388608,
+                "maxStreamReceiveWindow": 8388608,
+                "initConnectionReceiveWindow": 20971520,
+                "maxConnectionReceiveWindow": 20971520,
+                "maxIdleTimeout": 30,
+                "keepAlivePeriod": 10,
+                "disablePathMTUDiscovery": False,
+                "maxIncomingStreams": 1024,
+            },
+        },
+    }
+    if obfs_password:
+        stream["finalmask"]["udp"] = [{"type": "salamander", "settings": {"password": obfs_password}}]
+    return {
+        "tag": f"{TAG_PREFIX}hy2",
+        "port": port,
+        "transport": "udp",
+        "protocol": "hysteria",
+        "remark": "vps-skill-hy2",
+        "settings": {"version": 2},
+        "client": _client(identity, auth=identity["node_pass"], password=identity["node_pass"]),
+        "stream": stream,
+    }
+
+
+def reality_inbound(identity, port: int, target: str, server_names: List[str], private_key: str,
+                    public_key: str, short_id: str, xver: int = 0) -> Dict[str, Any]:
+    return {
+        "tag": f"{TAG_PREFIX}reality",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-reality",
+        "settings": {"decryption": "none", "encryption": "none"},
+        "client": _client(identity, flow="xtls-rprx-vision"),
+        "stream": {
+            "network": "tcp",
+            "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
+            "security": "reality",
+            "realitySettings": {
+                "show": False,
+                "xver": xver,
+                "target": target,
+                "serverNames": server_names,
+                "privateKey": private_key,
+                "minClientVer": "",
+                "maxClientVer": "",
+                "maxTimediff": 0,
+                "shortIds": [short_id],
+                "settings": {"publicKey": public_key, "fingerprint": "chrome", "serverName": "", "spiderX": ""},
+            },
+        },
+    }
+
+
+def build_db_payload(identity: Dict[str, str], inbounds: List[Dict[str, Any]], settings: Dict[str, str],
+                     db_path: str = DEFAULT_DB_PATH, backup: bool = True) -> Dict[str, Any]:
+    return {
+        "db_path": db_path,
+        "tag_prefix": TAG_PREFIX,
+        "identity": {k: identity[k] for k in ("email", "uuid", "sub_id", "node_pass")},
+        "inbounds": inbounds,
+        "settings": settings,
+        "backup": backup,
+        "sniffing": SNIFFING,
+    }
+
+
+# Static remote script: reads the JSON payload from stdin, never interpolated.
+REMOTE_DB_SCRIPT = r'''
+import glob, json, os, sqlite3, sys, time
+
+cfg = json.load(sys.stdin)
+db_path = cfg["db_path"]
+prefix = cfg["tag_prefix"]
+ident = cfg["identity"]
+UDP_PROTOCOLS = {"hysteria", "hysteria2", "tuic", "wireguard", "amneziawg", "masque"}
+
+
+def finish(obj, code=0):
+    print(json.dumps(obj))
+    sys.exit(code)
+
+
+if not os.path.exists(db_path):
+    finish({"ok": False, "error": "database not found: " + db_path}, 2)
+
+conn = sqlite3.connect(db_path, timeout=30)
+conn.isolation_level = None
+c = conn.cursor()
+
+
+def columns(table):
+    return {r[1] for r in c.execute("PRAGMA table_info(%s)" % table).fetchall()}
+
+
+tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+missing = {"inbounds", "settings"} - tables
+if missing:
+    finish({"ok": False, "error": "unsupported 3X-UI schema, missing tables: %s" % sorted(missing)}, 2)
+inbound_cols = columns("inbounds")
+need = {"id", "port", "protocol", "settings", "stream_settings", "tag", "enable"}
+if need - inbound_cols:
+    finish({"ok": False, "error": "unsupported inbounds schema, missing columns: %s" % sorted(need - inbound_cols)}, 2)
+
+
+def owned(tag):
+    return (tag or "").startswith(prefix)
+
+
+def transport(protocol, stream_str):
+    if protocol in UDP_PROTOCOLS:
+        return "udp"
+    try:
+        network = json.loads(stream_str or "{}").get("network")
+    except ValueError:
+        network = None
+    return "udp" if network == "kcp" else "tcp"
+
+
+# 1. Refuse to touch anything if a foreign, enabled inbound already uses a planned port/transport.
+conflicts = []
+for spec in cfg["inbounds"]:
+    rows = c.execute("SELECT id, tag, protocol, stream_settings FROM inbounds WHERE port = ? AND enable = 1",
+                     (spec["port"],)).fetchall()
+    for rid, tag, protocol, stream in rows:
+        if not owned(tag) and transport(protocol, stream) == spec["transport"]:
+            conflicts.append({"id": rid, "tag": tag, "port": spec["port"], "transport": spec["transport"]})
+if conflicts:
+    finish({"ok": False, "error": "port conflict with existing inbounds", "conflicts": conflicts}, 3)
+
+# 2. Consistent backup (online backup API), keep the five most recent.
+backup_path = None
+if cfg.get("backup", True):
+    backup_path = "%s.vps-skill-%d.bak" % (db_path, int(time.time()))
+    dst = sqlite3.connect(backup_path)
+    conn.backup(dst)
+    dst.close()
+    os.chmod(backup_path, 0o600)
+    for old in sorted(glob.glob(db_path + ".vps-skill-*.bak"))[:-5]:
+        os.remove(old)
+
+now_ms = int(time.time() * 1000)
+
+
+def set_setting(key, value):
+    # settings.key is not unique in 3X-UI and the panel reads the first row:
+    # update every existing row instead of appending a duplicate.
+    if c.execute("SELECT 1 FROM settings WHERE key = ?", (key,)).fetchone():
+        c.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+    else:
+        c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+
+def insert_row(table, values):
+    cols = [k for k in values if k in columns(table)]
+    c.execute("INSERT INTO %s (%s) VALUES (%s)" % (table, ", ".join(cols), ", ".join("?" * len(cols))),
+              [values[k] for k in cols])
+    return c.lastrowid
+
+
+def merged_settings(spec, existing_str):
+    try:
+        existing = json.loads(existing_str or "{}")
+    except ValueError:
+        existing = {}
+    clients = [cl for cl in existing.get("clients", []) if cl.get("email") != ident["email"]]
+    ours = dict(spec["client"], created_at=now_ms, updated_at=now_ms)
+    settings = dict(spec["settings"])
+    settings["clients"] = clients + [ours]
+    return json.dumps(settings, indent=2)
+
+
+result = {"ok": True, "inbounds": {}, "disabled_stale": [], "backup": backup_path}
+try:
+    c.execute("BEGIN")
+    for key, value in cfg["settings"].items():
+        set_setting(key, value)
+
+    client_id = None
+    if "clients" in tables:
+        row = c.execute("SELECT id FROM clients WHERE email = ?", (ident["email"],)).fetchone()
+        fields = {"uuid": ident["uuid"], "sub_id": ident["sub_id"], "password": ident["node_pass"],
+                  "auth": ident["node_pass"], "updated_at": now_ms}
+        if row:
+            client_id = row[0]
+            sets = [k for k in fields if k in columns("clients")]
+            c.execute("UPDATE clients SET %s WHERE id = ?" % ", ".join(k + " = ?" for k in sets),
+                      [fields[k] for k in sets] + [client_id])
+        else:
+            client_id = insert_row("clients", dict(fields, email=ident["email"], flow="", security="auto",
+                                                   reverse="", limit_ip=0, limit_hwid=0, total_gb=0,
+                                                   expiry_time=0, enable=1, tg_id=0, group_name="",
+                                                   comment="", reset=0, reset_day=0, reset_weekday=0,
+                                                   reset_max=0, traffic_reset="never", traffic_reset_day=1,
+                                                   created_at=now_ms, sync_orphaned_at=0))
+
+    for spec in cfg["inbounds"]:
+        stream = json.dumps(spec["stream"])
+        row = c.execute("SELECT id, settings FROM inbounds WHERE tag = ?", (spec["tag"],)).fetchone()
+        if row:
+            inbound_id = row[0]
+            c.execute("UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, "
+                      "enable = 1 WHERE id = ?",
+                      (spec["port"], spec["protocol"], spec["remark"], merged_settings(spec, row[1]), stream,
+                       inbound_id))
+        else:
+            inbound_id = insert_row("inbounds", {
+                "user_id": 1, "up": 0, "down": 0, "total": 0, "remark": spec["remark"], "sub_sort_index": 1,
+                "exclude_from_sub": 0, "enable": 1, "expiry_time": 0, "traffic_reset": "never",
+                "traffic_reset_day": 1, "last_traffic_reset_time": 0, "listen": "", "port": spec["port"],
+                "protocol": spec["protocol"], "settings": merged_settings(spec, None), "stream_settings": stream,
+                "tag": spec["tag"], "sniffing": json.dumps(cfg["sniffing"]), "node_id": None,
+                "share_addr_strategy": "node", "share_addr": "", "disable_flow": 0, "origin_node_guid": "",
+            })
+        result["inbounds"][spec["tag"]] = inbound_id
+        if client_id is not None and "client_inbounds" in tables:
+            link_cols = columns("client_inbounds")
+            link = {"client_id": client_id, "inbound_id": inbound_id, "flow_override": "", "created_at": now_ms}
+            cols = [k for k in link if k in link_cols]
+            c.execute("INSERT OR REPLACE INTO client_inbounds (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" * len(cols))),
+                      [link[k] for k in cols])
+
+    # Disable only skill-owned inbounds that are no longer part of the plan (e.g. after a profile switch).
+    planned = {spec["tag"] for spec in cfg["inbounds"]}
+    for rid, tag in c.execute("SELECT id, tag FROM inbounds WHERE enable = 1").fetchall():
+        if owned(tag) and tag not in planned:
+            c.execute("UPDATE inbounds SET enable = 0 WHERE id = ?", (rid,))
+            result["disabled_stale"].append(tag)
+    c.execute("COMMIT")
+except Exception as exc:
+    c.execute("ROLLBACK")
+    finish({"ok": False, "error": "database update failed and was rolled back: %r" % (exc,)}, 4)
+
+finish(result)
 '''
-    return template

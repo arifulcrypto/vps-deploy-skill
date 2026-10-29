@@ -1,55 +1,84 @@
 #!/usr/bin/env python3
 """
 VPS Deployer Unified Automation Engine:
-End-to-end automation CLI tool that connects to remote VPS, installs 3X-UI,
-configures multi-protocol coexistence (Hy2 + Reality + Cloudflare CDN) with
-dynamic non-fixed high ports, issues SSL certificates, generates QR codes,
-and produces redundant Clash Verge Rev subscriptions.
+Connects to a VPS, installs/configures 3X-UI and produces client artifacts.
+
+Profiles
+  legacy        VLESS-REALITY on a random high TCP port (external target), optional
+                Hysteria 2 on a random high UDP port, and VLESS-WS-TLS on 443 for a
+                Cloudflare-proxied domain.
+  reality-self  Single public TCP 443: VLESS-REALITY-Vision whose target is the
+                operator's own loopback HTTPS website (Nginx). Requires a DNS-only domain.
+
+Every step fails closed: no report, links or QR codes are written unless all remote
+steps, listener checks and the panel login probe succeed. Re-runs reuse the identity,
+ports and keys stored on the server in /etc/vps-skill/state.json.
 """
 import argparse
+import datetime
 import ipaddress
 import json
 import os
+import re
 import secrets
-import subprocess
 import sys
-import time
 import uuid
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-# Fix module imports when executed directly as a script (python3 scripts/vps_deployer.py)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+# Allow `python3 scripts/vps_deployer.py` as well as `python3 -m scripts.vps_deployer`
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.qr_engine import generate_qr
-from scripts.sub_converter import build_subscription_urls
-from scripts.clash_generator import generate_local_clash_yaml
-from scripts.db_configurator import generate_remote_sqlite_script
-from scripts.port_utils import generate_randomized_configs, generate_unambiguous_password
+from scripts import provision, web_profile  # noqa: E402
+from scripts.clash_generator import generate_local_clash_yaml  # noqa: E402
+from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, hy2_inbound,  # noqa: E402
+                                     reality_inbound, ws_inbound)
+from scripts.nodes import CARRIER_CLEAN_IPS, cdn_nodes, hy2_node, reality_node  # noqa: E402
+from scripts.panel_probe import REMOTE_PROBE_SCRIPT  # noqa: E402
+from scripts.port_utils import (generate_unambiguous_password, normalize_base_path,  # noqa: E402
+                                random_path, random_port)
+from scripts.qr_engine import generate_qr  # noqa: E402
+from scripts.remote import DeploymentError, SSHTarget, last_json_line, parse_kv  # noqa: E402
+from scripts.report import render_report, secure_dir, write_secret, write_secret_json  # noqa: E402
+from scripts.sub_converter import build_subscription_urls  # noqa: E402
 
-# Carrier-optimized Anycast Clean IPs (Public Cloudflare Anycast IP ranges)
-import re
-import datetime
+PROFILES = ("legacy", "reality-self")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+PATH_RE = re.compile(r"^/?[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/?$")
+VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+EMAIL_RE = re.compile(r"^[^@\s'\"]+@[a-z0-9.-]+\.[a-z]{2,}$")
+PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
+DEFAULT_REALITY_SNI = "addons.mozilla.org"
+DEFAULT_BACKEND_PORT = 8443
+CERT_ROOT = "/root/cert"
 
-CARRIER_CLEAN_IPS = {
-    "unicom": [("162.159.193.1", "Unicom-Opt1"), ("104.16.160.1", "Unicom-Opt2")],
-    "mobile": [("162.159.192.1", "Mobile-Opt1"), ("172.67.160.1", "Mobile-Opt2")],
-    "telecom": [("104.17.160.1", "Telecom-Opt1"), ("162.159.195.1", "Telecom-Opt2")],
-    "overseas": [("104.16.160.1", "CF-Anycast1"), ("104.17.160.1", "CF-Anycast2")],
-}
+__all__ = ["DeploymentError", "validate_config", "normalize_config", "build_plan", "deploy_vps", "main"]
 
 
-class DeploymentError(Exception):
-    """Custom exception for deployment failures."""
-    pass
+# ---------------------------------------------------------------------------
+# Validation & normalization
+# ---------------------------------------------------------------------------
+
+def _port(value: Any, name: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise DeploymentError(f"Invalid {name}: '{value}'. Must be an integer between 1 and 65535.")
+    if not 1 <= port <= 65535:
+        raise DeploymentError(f"Invalid {name}: '{value}'. Must be an integer between 1 and 65535.")
+    return port
+
+
+def _str(cfg: Dict[str, Any], key: str) -> str:
+    return str(cfg.get(key) or "").strip()
 
 
 def validate_config(cfg: Dict[str, Any]) -> None:
-    """Validate user input before attempting execution."""
-    # 1. IP validation
-    ip = (cfg.get("ip") or "").strip()
+    """Reject anything that could break remote commands or produce an unusable deployment."""
+    ip = _str(cfg, "ip")
     if not ip:
         raise DeploymentError("Missing required parameter: 'ip' (Target server IPv4 address)")
     try:
@@ -57,792 +86,573 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     except ValueError:
         raise DeploymentError(f"Invalid IPv4 address format: '{ip}'")
 
-    # 2. Authentication validation (password default, key compatible)
-    ssh_pass = cfg.get("ssh_pass")
-    ssh_key = cfg.get("ssh_key")
-    if not ssh_pass and not ssh_key:
+    if not cfg.get("ssh_pass") and not cfg.get("ssh_key"):
         raise DeploymentError("Missing authentication credentials: 'ssh_pass' (root password) or 'ssh_key' is required")
+    _port(cfg.get("ssh_port") or 22, "SSH port")
 
-    # 3. Port validation
-    ssh_port = cfg.get("ssh_port", 22)
-    try:
-        port_num = int(ssh_port)
-        if not (1 <= port_num <= 65535):
-            raise ValueError()
-    except (ValueError, TypeError):
-        raise DeploymentError(f"Invalid SSH port: '{ssh_port}'. Must be an integer between 1 and 65535.")
-
-    # 4. IPv6 validation if supplied
-    ipv6 = (cfg.get("ipv6") or "").strip()
+    ipv6 = _str(cfg, "ipv6")
     if ipv6:
         try:
             ipaddress.IPv6Address(ipv6)
         except ValueError:
             raise DeploymentError(f"Invalid IPv6 address format: '{ipv6}'")
 
+    for key in ("domain", "ipv6_domain", "panel_domain", "reality_sni"):
+        value = _str(cfg, key).lower()
+        if value and not DOMAIN_RE.match(value):
+            raise DeploymentError(f"Invalid {key}: '{value}' is not a valid DNS hostname.")
 
-def run_ssh_command(
-    host: str,
-    port: int,
-    user: str,
-    password: Optional[str] = None,
-    key_file: Optional[str] = None,
-    command: str = "",
-    timeout: int = 120,
-    check: bool = True
-) -> subprocess.CompletedProcess:
-    """
-    Execute command on remote server via SSH without exposing password in process list.
-    Uses environment variable SSHPASS (sshpass -e) or SSH key.
-    """
-    env = os.environ.copy()
-    ssh_opts = [
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        "-o", "BatchMode=no",
-        "-p", str(port)
-    ]
+    profile = _str(cfg, "profile") or "legacy"
+    if profile not in PROFILES:
+        raise DeploymentError(f"Invalid profile '{profile}'. Choose one of: {', '.join(PROFILES)}")
+    if profile == "reality-self" and not _str(cfg, "domain"):
+        raise DeploymentError("Profile 'reality-self' requires 'domain' (a DNS-only / grey-cloud A record to this VPS).")
 
-    if key_file:
-        cmd = ["ssh"] + ssh_opts + ["-i", key_file, f"{user}@{host}", command]
-    elif password:
-        env["SSHPASS"] = password
-        cmd = ["sshpass", "-e", "ssh"] + ssh_opts + [f"{user}@{host}", command]
-    else:
-        cmd = ["ssh"] + ssh_opts + [f"{user}@{host}", command]
+    isp = (_str(cfg, "client_isp") or "unicom").lower()
+    if isp not in CARRIER_CLEAN_IPS:
+        raise DeploymentError(f"Invalid client_isp '{isp}'. Choose one of: {', '.join(CARRIER_CLEAN_IPS)}")
+    if (_str(cfg, "lang") or "en").lower() not in ("en", "zh"):
+        raise DeploymentError("Invalid lang. Choose 'en' or 'zh'.")
 
-    res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
-    if check and res.returncode != 0:
-        err_msg = res.stderr.strip()
-        if "Permission denied" in err_msg:
-            raise DeploymentError(f"SSH Authentication failed for {user}@{host}:{port}. Root password or credentials incorrect.")
-        elif "Connection timed out" in err_msg or "Network is unreachable" in err_msg:
-            raise DeploymentError(f"SSH Connection timed out to {host}:{port}. Host unreachable or port blocked by firewall.")
-        elif "Connection refused" in err_msg:
-            raise DeploymentError(f"SSH Connection refused on {host}:{port}. Is SSH service running on this port?")
-        else:
-            raise DeploymentError(f"Remote command failed (exit code {res.returncode}): {err_msg[:300]}")
-    return res
+    tcp_ports = {}
+    for key in ("panel_port", "reality_port", "web_backend_port"):
+        if cfg.get(key) not in (None, ""):
+            tcp_ports[key] = _port(cfg[key], key)
+    if cfg.get("hy2_port") not in (None, ""):
+        _port(cfg["hy2_port"], "hy2_port")
+    reserved = {80: "HTTP/ACME", 443: "HTTPS", int(cfg.get("ssh_port") or 22): "SSH"}
+    seen: Dict[int, str] = {}
+    for key, port in tcp_ports.items():
+        if port in reserved:
+            raise DeploymentError(f"{key}={port} collides with the {reserved[port]} port.")
+        if port in seen:
+            raise DeploymentError(f"{key}={port} collides with {seen[port]}.")
+        seen[port] = key
 
-
-def scp_file_to_remote(
-    host: str,
-    port: int,
-    user: str,
-    password: Optional[str],
-    key_file: Optional[str],
-    local_path: str,
-    remote_path: str,
-    timeout: int = 60
-) -> None:
-    """Securely copy file to remote host."""
-    env = os.environ.copy()
-    scp_opts = [
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        "-P", str(port)
-    ]
-
-    if key_file:
-        cmd = ["scp"] + scp_opts + ["-i", key_file, local_path, f"{user}@{host}:{remote_path}"]
-    elif password:
-        env["SSHPASS"] = password
-        cmd = ["sshpass", "-e", "scp"] + scp_opts + [local_path, f"{user}@{host}:{remote_path}"]
-    else:
-        cmd = ["scp"] + scp_opts + [local_path, f"{user}@{host}:{remote_path}"]
-
-    res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
-    if res.returncode != 0:
-        raise DeploymentError(f"SCP transfer failed to {host}:{remote_path}: {res.stderr.strip()[:200]}")
+    for key in ("panel_pass", "node_pass", "obfs_password"):
+        if cfg.get(key) and not SECRET_RE.match(str(cfg[key])):
+            raise DeploymentError(f"Invalid {key}: use 8-64 characters from [A-Za-z0-9_-].")
+    if cfg.get("panel_user") and not USER_RE.match(str(cfg["panel_user"])):
+        raise DeploymentError("Invalid panel_user: use 3-32 characters from [A-Za-z0-9_.-].")
+    if cfg.get("panel_base_path") and not PATH_RE.match(str(cfg["panel_base_path"])):
+        raise DeploymentError("Invalid panel_base_path: use path segments of [A-Za-z0-9_-].")
+    if cfg.get("xui_version") and not VERSION_RE.match(str(cfg["xui_version"])):
+        raise DeploymentError("Invalid xui_version: expected a release tag such as 'v3.11.0'.")
+    if cfg.get("acme_email") and not EMAIL_RE.match(str(cfg["acme_email"]).lower()):
+        raise DeploymentError("Invalid acme_email.")
+    if cfg.get("node_prefix") and not PREFIX_RE.match(str(cfg["node_prefix"])):
+        raise DeploymentError("Invalid node_prefix: use 1-24 characters from [A-Za-z0-9_-].")
+    title = str(cfg.get("site_title") or "")
+    if len(title) > 80 or any(ord(ch) < 32 for ch in title):
+        raise DeploymentError("Invalid site_title: at most 80 printable characters.")
 
 
-def verify_remote_panel_login(
-    ip: str,
-    port: int,
-    user: str,
-    password: Optional[str],
-    key_file: Optional[str],
-    panel_port: int,
-    panel_base_path: str,
-    panel_user: str,
-    panel_pass: str,
-    max_retries: int = 3,
-) -> Tuple[str, str]:
-    """
-    Physically execute remote login probe against 3X-UI backend.
-    Guarantees that credentials written to report are 100% verified to work.
-    Auto-recovers from legacy password hashes, 2FA locks, or 15-minute brute-force blocks.
-    """
-    cur_user = panel_user
-    cur_pass = panel_pass
-
-    for attempt in range(1, max_retries + 1):
-        probe_py = f"""
-import urllib.request, http.cookiejar, json, re
-
-cookie_jar = http.cookiejar.CookieJar()
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-base_url = "http://127.0.0.1:{panel_port}{panel_base_path}"
-
-try:
-    req = urllib.request.Request(base_url, headers={{"User-Agent": "Mozilla/5.0"}})
-    with opener.open(req, timeout=10) as resp:
-        html = resp.read().decode("utf-8")
-except Exception as e:
-    print(json.dumps({{"success": False, "error": f"Failed to connect: {{e}}"}}))
-    exit(0)
-
-csrf_match = re.search(r'csrf-token[\"\'\\s]+content=[\"\']([^\"\']+)', html)
-csrf = csrf_match.group(1) if csrf_match else ""
-
-login_url = f"{{base_url}}login"
-payload = json.dumps({{"username": "{cur_user}", "password": "{cur_pass}", "loginSecret": ""}}).encode("utf-8")
-post_req = urllib.request.Request(login_url, data=payload, headers={{
-    "Content-Type": "application/json",
-    "X-CSRF-Token": csrf,
-    "Referer": base_url,
-    "User-Agent": "Mozilla/5.0"
-}})
-
-try:
-    with opener.open(post_req, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        print(json.dumps(data))
-except Exception as e:
-    print(json.dumps({{"success": False, "error": str(e)}}))
-"""
-        res = run_ssh_command(ip, port, user, password, key_file, f"python3 -c '{probe_py}'", timeout=20, check=False)
-        output = res.stdout.strip()
-        
-        is_success = False
-        try:
-            for line in reversed(output.splitlines()):
-                line = line.strip()
-                if line.startswith("{") and line.endswith("}"):
-                    data = json.loads(line)
-                    if data.get("success") is True:
-                        is_success = True
-                        break
-        except Exception:
-            pass
-
-        if is_success:
-            print(f"[+] 3X-UI panel login verified successfully for user '{cur_user}'.")
-            return cur_user, cur_pass
-
-        print(f"[!] Warning: Panel login probe attempt {attempt} failed for '{cur_user}'. Auto-recovering...")
-        if attempt == 1:
-            heal_cmd = (
-                f"[ -f /usr/local/x-ui/x-ui ] && /usr/local/x-ui/x-ui setting -username '{cur_user}' -password '{cur_pass}' -resetTwoFactor=true; "
-                "systemctl restart x-ui && sleep 2"
-            )
-            run_ssh_command(ip, port, user, password, key_file, heal_cmd, timeout=20, check=False)
-        else:
-            cur_user = f"admin_{secrets.token_hex(2)}"
-            heal_cmd = (
-                f"[ -f /usr/local/x-ui/x-ui ] && /usr/local/x-ui/x-ui setting -username '{cur_user}' -password '{cur_pass}' -resetTwoFactor=true; "
-                "systemctl restart x-ui && sleep 2"
-            )
-            run_ssh_command(ip, port, user, password, key_file, heal_cmd, timeout=20, check=False)
-
-    return cur_user, cur_pass
+def _flag(cfg: Dict[str, Any], key: str, default: bool) -> bool:
+    value = cfg.get(key)
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
-def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
-    """Execute complete VPS deployment pipeline with dynamic high ports, self-healing, and dual subscriptions."""
+def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     validate_config(cfg)
-
-    ip = cfg["ip"]
-    port = int(cfg.get("ssh_port") or 22)
-    user = cfg.get("ssh_user") or "root"
-    password = cfg.get("ssh_pass")
-    key_file = cfg.get("ssh_key")
-    domain = (cfg.get("domain") or "").strip() or None
-    panel_domain = (cfg.get("panel_domain") or "").strip() or None
-    ipv6_domain = (cfg.get("ipv6_domain") or "").strip() or None
-    ipv6 = (cfg.get("ipv6") or "").strip() or None
-    carrier = (cfg.get("client_isp") or "unicom").lower()
-    client_ip = cfg.get("client_ip") or "Generic Outbound"
-    client_loc = cfg.get("client_location") or "Regional Metro"
-    output_dir = os.path.abspath(cfg.get("output_dir") or f"./output/{ip}")
-    lang = (cfg.get("lang") or "en").lower()
-    clean_conflicts = cfg.get("clean_conflicts", True)
-
-    # Generate non-colliding randomized high ports and secrets
-    random_cfg = generate_randomized_configs(
-        panel_port=cfg.get("panel_port"),
-        hy2_port=cfg.get("hy2_port"),
-        reality_port=cfg.get("reality_port"),
-        panel_path=cfg.get("panel_base_path"),
-        obfs_pass=cfg.get("obfs_password"),
-    )
-
-    panel_port = random_cfg["panel_port"]
-    panel_base_path = random_cfg["panel_base_path"]
-    hy2_port = random_cfg["hy2_port"]
-    reality_port = random_cfg["reality_port"]
-    obfs_pass = random_cfg["obfs_password"]
-    reality_shortid = random_cfg["reality_short_id"]
-    cf_port = 443
-
-    # Generate dedicated, separate unambiguous credentials for 3X-UI panel and nodes (NEVER reuse SSH root password!)
-    panel_user = "admin"
-    panel_pass = cfg.get("panel_pass") or generate_unambiguous_password(14, prefix="Admin_")
-    node_pass = cfg.get("node_pass") or generate_unambiguous_password(14, prefix="Node_")
-    client_uuid = str(uuid.uuid4())
-    sub_id = "sub" + secrets.token_hex(4)
-
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"[*] Target Server: {ip}:{port} (User: {user})")
-    print(f"[*] Dynamic Allocation -> Panel Port: {panel_port}, Hy2 UDP: {hy2_port}, Reality TCP: {reality_port}")
-
-    if dry_run:
-        print("[!] DRY-RUN MODE: Validation passed. Skipping remote execution.")
-        print(f"    Target Host        : {user}@{ip}:{port}")
-        print(f"    Panel Port (TCP)   : {panel_port} (Secret Path: {panel_base_path})")
-        print(f"    Hy2 Port (UDP)     : {hy2_port}")
-        print(f"    Reality Port (TCP) : {reality_port}")
-        print(f"    CF WS Port (TCP)   : {cf_port}")
-        if domain:
-            print(f"    Domain / SSL       : {domain} (Standalone ACME)")
-        print(f"    Target Carrier     : {carrier.upper()} ({client_loc})")
-        return {
-            "status": "dry_run_success",
-            "ip": ip,
-            "panel_port": panel_port,
-            "hy2_port": hy2_port,
-            "reality_port": reality_port,
-            "cf_port": cf_port,
-            "domain": domain,
-            "output_dir": output_dir,
-        }
-
-    # 1. Preflight SSH check & OS inspection
-    print("[*] Phase 1: Preflight SSH check & environment inspection...")
-    preflight_res = run_ssh_command(ip, port, user, password, key_file, "uname -srm && cat /etc/os-release", timeout=15)
-    print(f"[+] Remote host verified: {preflight_res.stdout.splitlines()[0] if preflight_res.stdout else 'Linux'}")
-
-    # Check for port conflicts non-destructively
-    conflict_check = run_ssh_command(
-        ip, port, user, password, key_file,
-        "ss -tlpn '( sport = :80 or sport = :443 )' | grep -v 'Local Address' || true",
-        timeout=10, check=False
-    )
-    if conflict_check.stdout.strip():
-        print(f"[!] Notice: Port 80/443 listener detected:\n{conflict_check.stdout.strip()}")
-        if clean_conflicts:
-            print("[*] Resolving port conflicts for standalone acme & 443 proxy...")
-            run_ssh_command(
-                ip, port, user, password, key_file,
-                "systemctl stop x-ui xray nginx apache2 caddy 2>/dev/null || true; pkill -9 -f 'xray|x-ui' 2>/dev/null || true; systemctl disable xray nginx apache2 caddy 2>/dev/null || true",
-                timeout=15, check=False
-            )
-
-    # Ensure BBR & open firewall for dynamic ports
-    prep_cmd = f"""
-sysctl -w net.core.default_qdisc=fq 2>/dev/null || true
-sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
-which ufw >/dev/null 2>&1 && (ufw allow {panel_port}/tcp; ufw allow {reality_port}/tcp; ufw allow {hy2_port}/udp; ufw allow 443/tcp; ufw allow 80/tcp) || true
-which iptables >/dev/null 2>&1 && (iptables -I INPUT -p tcp --dport {panel_port} -j ACCEPT; iptables -I INPUT -p tcp --dport {reality_port} -j ACCEPT; iptables -I INPUT -p udp --dport {hy2_port} -j ACCEPT; iptables -I INPUT -p tcp --dport 443 -j ACCEPT; iptables -I INPUT -p tcp --dport 80 -j ACCEPT) || true
-which apt-get >/dev/null 2>&1 && (apt-get update -y && apt-get install -y curl socat cron python3) || true
-which yum >/dev/null 2>&1 && (yum install -y curl socat cronie python3) || true
-"""
-    run_ssh_command(ip, port, user, password, key_file, prep_cmd, timeout=120)
-
-    # 2. SSL Certificate Issuance
-    cert_path = None
-    key_path = None
-    if domain:
-        print(f"[*] Phase 2: Ensuring Let's Encrypt ECC Certificate for {domain}...")
-        domains_flag = f"-d {domain}"
-        if ipv6_domain:
-            domains_flag += f" -d {ipv6_domain}"
-
-        acme_email = f"admin@{domain.split('.', 1)[-1]}" if "." in domain else "admin@example.com"
-        acme_cmd = f"""
-if [ -s /root/cert/{domain}/fullchain.pem ] && [ -s /root/cert/{domain}/privkey.pem ]; then
-    echo 'CERT_SUCCESS'
-else
-    [ -f ~/.acme.sh/acme.sh ] || curl -s https://get.acme.sh | sh -s email={acme_email}
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    ~/.acme.sh/acme.sh --issue {domains_flag} --standalone --keylength ec-256 || ~/.acme.sh/acme.sh --issue -d {domain} --standalone --keylength ec-256 || true
-    mkdir -p /root/cert/{domain}
-    ~/.acme.sh/acme.sh --install-cert -d {domain} --ecc --fullchain-file /root/cert/{domain}/fullchain.pem --key-file /root/cert/{domain}/privkey.pem || true
-    if [ ! -s /root/cert/{domain}/fullchain.pem ]; then
-        openssl ecparam -name prime256v1 -genkey -noout -out /root/cert/{domain}/privkey.pem
-        openssl req -new -x509 -sha256 -key /root/cert/{domain}/privkey.pem -out /root/cert/{domain}/fullchain.pem -days 3650 -subj "/CN={domain}" -nodes
-    fi
-    [ -s /root/cert/{domain}/fullchain.pem ] && echo 'CERT_SUCCESS'
-fi
-"""
-        acme_res = run_ssh_command(ip, port, user, password, key_file, acme_cmd, timeout=180, check=False)
-        if "CERT_SUCCESS" in acme_res.stdout:
-            cert_path = f"/root/cert/{domain}/fullchain.pem"
-            key_path = f"/root/cert/{domain}/privkey.pem"
-            print(f"[+] Certificate verified at /root/cert/{domain}/")
-        else:
-            print(f"[!] Warning: acme.sh issuance did not complete. Continuing in fallback mode.")
-
-    # 3. Install 3X-UI
-    print(f"[*] Phase 3: Installing 3X-UI panel on dynamic port {panel_port}...")
-    xui_install_cmd = f"""
-export XUI_NONINTERACTIVE=1
-export XUI_USERNAME="{panel_user}"
-export XUI_PASSWORD="{panel_pass}"
-export XUI_PANEL_PORT="{panel_port}"
-export XUI_WEB_BASE_PATH="{panel_base_path}"
-curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh | bash
-[ -f /usr/local/x-ui/x-ui ] && /usr/local/x-ui/x-ui setting -username "{panel_user}" -password "{panel_pass}" -resetTwoFactor=true && /usr/local/x-ui/x-ui setting -port "{panel_port}" && /usr/local/x-ui/x-ui setting -webBasePath "{panel_base_path}" || true
-"""
-    run_ssh_command(ip, port, user, password, key_file, xui_install_cmd, timeout=180)
-
-    # 4. Generate Reality Keypair on VPS via Xray
-    print("[*] Phase 4: Generating Reality keypair via remote Xray...")
-    gen_key_cmd = (
-        'XRAY_BIN=$(find /usr/local/x-ui/bin/ -maxdepth 1 -name "xray*" -type f -perm /111 2>/dev/null | head -n 1); '
-        '[ -z "$XRAY_BIN" ] && XRAY_BIN="/usr/local/x-ui/bin/xray-linux-amd64"; '
-        '$XRAY_BIN x25519'
-    )
-    k_res = run_ssh_command(ip, port, user, password, key_file, gen_key_cmd, timeout=15)
-    m_priv = re.search(r"Private\s*Key\s*:\s*(\S+)", k_res.stdout, re.IGNORECASE)
-    m_pub = re.search(r"(?:Public\s*Key|Password\s*\(PublicKey\))\s*:\s*(\S+)", k_res.stdout, re.IGNORECASE)
-    reality_privkey = m_priv.group(1).strip() if m_priv else ""
-    reality_pubkey = m_pub.group(1).strip() if m_pub else ""
-
-    if not reality_pubkey or not reality_privkey:
-        raise DeploymentError(f"Failed to generate Reality X25519 keypair from remote Xray binary. Output was: {k_res.stdout.strip()}")
-
-    # Inject Inbounds into SQLite safely
-    py_remote_script = generate_remote_sqlite_script(
-        client_uuid=client_uuid,
-        sub_id=sub_id,
-        email="admin@example.com",
-        password=node_pass,
-        hy2_port=hy2_port,
-        reality_port=reality_port,
-        cf_port=cf_port,
-        domain=domain,
-        cert_path=cert_path,
-        key_path=key_path,
-        obfs_password=obfs_pass,
-        reality_privkey=reality_privkey,
-        reality_pubkey=reality_pubkey,
-        reality_shortid=reality_shortid,
-        reality_sni="addons.mozilla.org",
-        panel_domain=panel_domain,
-    )
-
-    tmp_py = f"/tmp/_tmp_3xui_{secrets.token_hex(4)}.py"
-    fd = os.open(tmp_py, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with open(fd, "w", encoding="utf-8") as f:
-        f.write(py_remote_script)
-
-    try:
-        scp_file_to_remote(ip, port, user, password, key_file, tmp_py, "/root/_setup_inbounds.py")
-    finally:
-        if os.path.exists(tmp_py):
-            os.remove(tmp_py)
-
-    apply_cmd = (
-        "python3 /root/_setup_inbounds.py; STATUS=$?; "
-        "rm -f /root/_setup_inbounds.py; "
-        "[ $STATUS -eq 0 ] && systemctl restart x-ui && sleep 2 && ss -tulpn"
-    )
-    apply_res = run_ssh_command(ip, port, user, password, key_file, apply_cmd, timeout=30)
-    print(f"[+] Inbounds applied and 3X-UI restarted cleanly.\n{apply_res.stdout.strip()}")
-
-    # 4.5 Closed-loop verification: Authenticate credentials against remote 3X-UI instance
-    print("[*] Phase 4.5: Executing closed-loop login verification for 3X-UI credentials...")
-    panel_user, panel_pass = verify_remote_panel_login(
-        ip=ip,
-        port=port,
-        user=user,
-        password=password,
-        key_file=key_file,
-        panel_port=panel_port,
-        panel_base_path=panel_base_path,
-        panel_user=panel_user,
-        panel_pass=panel_pass,
-    )
-
-    # 5. Build Node Links
-    print("[*] Phase 5: Generating client node links & local Clash configurations...")
-    nodes = []
-    clash_proxies = []
-
-    # Node 1: Hysteria 2
-    sni_host = domain if domain else ip
-    node_hy2 = f"hysteria2://{node_pass}@{ip}:{hy2_port}/?insecure={'0' if domain else '1'}&sni={sni_host}&obfs=salamander&obfs-password={obfs_pass}#VPS-Direct-Hy2-{hy2_port}"
-    nodes.append(node_hy2)
-    clash_proxies.append({
-        "name": f"VPS-Direct-Hy2-{hy2_port}",
-        "type": "hysteria2",
-        "server": ip,
-        "port": hy2_port,
-        "password": node_pass,
-        "sni": sni_host,
-        "skip-cert-verify": False if domain else True,
-        "obfs": "salamander",
-        "obfs-password": obfs_pass
-    })
-
-    # Node 2: Reality
-    node_reality = f"vless://{client_uuid}@{ip}:{reality_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=addons.mozilla.org&fp=chrome&pbk={reality_pubkey}&sid={reality_shortid}&type=tcp#VPS-Direct-Reality-{reality_port}"
-    nodes.append(node_reality)
-    clash_proxies.append({
-        "name": f"VPS-Direct-Reality-{reality_port}",
-        "type": "vless",
-        "server": ip,
-        "port": reality_port,
-        "uuid": client_uuid,
-        "network": "tcp",
-        "tls": True,
-        "udp": True,
-        "flow": "xtls-rprx-vision",
-        "servername": "addons.mozilla.org",
-        "reality-opts": {
-            "public-key": reality_pubkey,
-            "short-id": reality_shortid
-        },
-        "client-fingerprint": "chrome"
-    })
-
-    # Node 3 & 4: Clean IPs (if domain configured)
-    node_clean_1 = None
-    node_clean_2 = None
-    node_cf_443 = None
-    node_ipv6 = None
-
-    if domain:
-        clean_ips = CARRIER_CLEAN_IPS.get(carrier, CARRIER_CLEAN_IPS["unicom"])
-        node_clean_1 = f"vless://{client_uuid}@{clean_ips[0][0]}:{cf_port}?type=ws&security=tls&path=%2Fws&host={domain}&sni={domain}#VPS-CF-{clean_ips[0][1]}-{cf_port}"
-        node_clean_2 = f"vless://{client_uuid}@{clean_ips[1][0]}:{cf_port}?type=ws&security=tls&path=%2Fws&host={domain}&sni={domain}#VPS-CF-{clean_ips[1][1]}-{cf_port}"
-        nodes.extend([node_clean_1, node_clean_2])
-
-        clash_proxies.append({
-            "name": f"VPS-CF-{clean_ips[0][1]}-{cf_port}",
-            "type": "vless",
-            "server": clean_ips[0][0],
-            "port": cf_port,
-            "uuid": client_uuid,
-            "network": "ws",
-            "tls": True,
-            "udp": True,
-            "servername": domain,
-            "ws-opts": {"path": "/ws", "headers": {"Host": domain}}
-        })
-
-        # Node 5: Standard Domain 443
-        node_cf_443 = f"vless://{client_uuid}@{domain}:{cf_port}?type=ws&security=tls&path=%2Fws&host={domain}&sni={domain}#VPS-CF-VLESS-{cf_port}"
-        nodes.append(node_cf_443)
-        clash_proxies.append({
-            "name": f"VPS-CF-VLESS-{cf_port}",
-            "type": "vless",
-            "server": domain,
-            "port": cf_port,
-            "uuid": client_uuid,
-            "network": "ws",
-            "tls": True,
-            "udp": True,
-            "servername": domain,
-            "ws-opts": {"path": "/ws", "headers": {"Host": domain}}
-        })
-
-        # Node 6: IPv6 Domain if present
-        if ipv6_domain:
-            node_ipv6 = f"vless://{client_uuid}@{ipv6_domain}:{cf_port}?type=ws&security=tls&path=%2Fws&host={ipv6_domain}&sni={ipv6_domain}#VPS-CF-IPv6-{cf_port}"
-            nodes.append(node_ipv6)
-            clash_proxies.append({
-                "name": f"VPS-CF-IPv6-{cf_port}",
-                "type": "vless",
-                "server": ipv6_domain,
-                "port": cf_port,
-                "uuid": client_uuid,
-                "network": "ws",
-                "tls": True,
-                "udp": True,
-                "servername": ipv6_domain,
-                "ws-opts": {"path": "/ws", "headers": {"Host": ipv6_domain}}
-            })
-
-    # 6. QR Code Generation (Images & Terminal ASCII)
-    png_hy2 = os.path.join(output_dir, "node_hy2_qr.png")
-    png_reality = os.path.join(output_dir, "node_reality_qr.png")
-    png_cf_443 = os.path.join(output_dir, "node_cf_443_qr.png") if domain else None
-
-    ascii_hy2 = generate_qr(node_hy2, png_hy2)
-    ascii_reality = generate_qr(node_reality, png_reality)
-    ascii_cf_443 = generate_qr(node_cf_443, png_cf_443) if (domain and png_cf_443) else ""
-
-    # 7. Generate Local Offline Clash YAML (100% private, no credentials leaked)
-    offline_yaml_path = os.path.join(output_dir, "clash_config.yaml")
-    generate_local_clash_yaml(clash_proxies, offline_yaml_path)
-
-    # Online Subscription URLs (Primary OnePage + Fallback v1.mk)
-    onepage_sub, fallback_sub = build_subscription_urls(nodes)
-
-    # 8. Save Formatted Output Report (.txt) with Embedded Terminal ASCII QR Codes
-    report_file = os.path.join(output_dir, f"vps_{ip}_info.txt")
-    if panel_domain and cert_path:
-        panel_proto = "https"
-        panel_host = panel_domain
-        panel_status_zh = f"已启用独立域名 (HTTPS) / 动态随机端口 {panel_port} / 随机安全路径"
-        panel_tip_zh = "已配置指定域名 HTTPS 访问。"
-        panel_status_en = f"Dedicated Domain (HTTPS) / Dynamic Port {panel_port} / Secret Path"
-    else:
-        panel_proto = "http"
-        panel_host = ip
-        panel_status_zh = f"纯 IP 直连 (HTTP) / 动态高位端口 {panel_port} / 随机安全路径保护"
-        panel_tip_zh = "面板默认采用纯 IP + HTTP 直连模式，彻底避免 Cloudflare 非标端口丢弃与证书不匹配；后台已受高强度随机安全路径保护。"
-        panel_status_en = f"Raw IP Direct (HTTP) / Dynamic High Port {panel_port} / Secret Path Protection"
-
-    panel_url = f"{panel_proto}://{panel_host}:{panel_port}{panel_base_path}"
-    report_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-
-    if lang == "zh":
-        report_text = f"""================================================================================
-                    VPS 自动化部署与多协议共存全量档案
-================================================================================
-服务器 IP 地址 : {ip}
-IPv6 地址      : {ipv6 if ipv6 else '未配置'}
-绑定主域名     : {domain if domain else '未绑定 (裸IP直连)'}
-IPv6 专属域名  : {ipv6_domain if ipv6_domain else '未配置'}
-针对优化运营商 : {carrier.upper()} ({client_loc} | 出口 IP: {client_ip})
-部署更新时间   : {report_timestamp}
-
---------------------------------------------------------------------------------
-一、运维登录与 3X-UI 面板 (动态安全高端口)
---------------------------------------------------------------------------------
-SSH 连接端口   : {port}
-SSH 用户名     : {user}
-快捷连接命令   : ssh {user}@{ip} -p {port}
-
-3X-UI 面板地址 : {panel_url}
-面板登录用户   : {panel_user}
-面板登录密码   : {panel_pass}
-面板安全状态   : {panel_status_zh}
-访问提示说明   : {panel_tip_zh}
-
---------------------------------------------------------------------------------
-二、多协议共存技术架构 (三大协议并行生效，动态高端口抗封锁)
---------------------------------------------------------------------------------
-1. 端口 {hy2_port} (UDP) : Hysteria 2 协议 (QUIC + BBR，晚高峰抗丢包神器)
-2. 端口 {reality_port} (TCP) : VLESS-Reality 协议 (XTLS Vision 直连 / 极低握手延迟)
-3. 端口 {cf_port}   (TCP) : VLESS-WS-TLS 协议 (走 Cloudflare CDN / 全平台抗封锁)
-
---------------------------------------------------------------------------------
-三、客户端节点链接与终端二维码
---------------------------------------------------------------------------------
-[🔥 Hysteria 2 晚高峰推荐节点]
-链接: {node_hy2}
-终端二维码:
-{ascii_hy2}
-
-[⚡ VLESS-Reality 低延迟直连节点]
-链接: {node_reality}
-终端二维码:
-{ascii_reality}
-"""
-        if domain:
-            report_text += f"""
-[🌐 Cloudflare 运营商优选 Clean IP 1]
-链接: {node_clean_1}
-
-[🌐 Cloudflare 运营商优选 Clean IP 2]
-链接: {node_clean_2}
-
-[🛡️ Cloudflare CDN 标准 443 节点]
-链接: {node_cf_443}
-终端二维码:
-{ascii_cf_443}
-"""
-            if node_ipv6:
-                report_text += f"""
-[🌐 Cloudflare CDN IPv6 专属节点]
-链接: {node_ipv6}
-"""
-        report_text += f"""
---------------------------------------------------------------------------------
-四、双轨 Clash Verge Rev 订阅链接 (主备冗余，内置 ACL4SSR 规则)
---------------------------------------------------------------------------------
-1. 🔥 主订阅 (OnePage 在线转换直出，推荐首选):
-{onepage_sub}
-
-2. 🛡️ 备用订阅 (v1.mk 备用分流转换通道):
-{fallback_sub}
-
---------------------------------------------------------------------------------
-五、本地离线归档文件
---------------------------------------------------------------------------------
-1. 详细档案文件 : {report_file}
-2. 离线规则文件 : {offline_yaml_path} (已本地生成，零敏感信息外泄)
-3. 机器可读结果 : {os.path.join(output_dir, 'result.json')}
-4. 节点二维码   :
-   - Hysteria 2 : {png_hy2}
-   - Reality    : {png_reality}
-   - 标准 443   : {png_cf_443 if domain else '无'}
-================================================================================
-"""
-    else:
-        report_text = f"""================================================================================
-              VPS Automated Deployment & Multi-Protocol Archive
-================================================================================
-Server IPv4     : {ip}
-Server IPv6     : {ipv6 if ipv6 else 'Not configured'}
-Primary Domain  : {domain if domain else 'None (Bare IP direct)'}
-IPv6 Domain     : {ipv6_domain if ipv6_domain else 'Not configured'}
-Optimized Target: {carrier.upper()} ({client_loc} | Outbound IP: {client_ip})
-Generated At    : {report_timestamp}
-
---------------------------------------------------------------------------------
-1. SSH & 3X-UI Control Panel Credentials (Dynamic High Ports)
---------------------------------------------------------------------------------
-SSH Port        : {port}
-SSH Username    : {user}
-Quick Command   : ssh {user}@{ip} -p {port}
-
-3X-UI Dashboard : {panel_url}
-Dashboard User  : {panel_user}
-Dashboard Pass  : {panel_pass}
-Security Status : {panel_status_en}
-
---------------------------------------------------------------------------------
-2. Multi-Protocol Architecture (3 Inbounds Concurrently Active)
---------------------------------------------------------------------------------
-1. Port {hy2_port} (UDP) : Hysteria 2 Protocol (QUIC + BBR / Peak-Hour Anti-Packet-Loss)
-2. Port {reality_port} (TCP) : VLESS-Reality Protocol (XTLS Vision / Minimal Handshake Latency)
-3. Port {cf_port}   (TCP) : VLESS-WS-TLS Protocol (Cloudflare CDN Anycast / Anti-Block Armor)
-
---------------------------------------------------------------------------------
-3. Client Node URLs & Embedded Terminal ASCII QR Codes
---------------------------------------------------------------------------------
-[🔥 Hysteria 2 Peak-Hour Recommended]
-URL: {node_hy2}
-Terminal QR:
-{ascii_hy2}
-
-[⚡ VLESS-Reality Ultra-Low Latency Direct]
-URL: {node_reality}
-Terminal QR:
-{ascii_reality}
-"""
-        if domain:
-            report_text += f"""
-[🌐 Cloudflare Carrier Clean IP Node 1]
-URL: {node_clean_1}
-
-[🌐 Cloudflare Carrier Clean IP Node 2]
-URL: {node_clean_2}
-
-[🛡️ Cloudflare CDN Standard 443 Node]
-URL: {node_cf_443}
-Terminal QR:
-{ascii_cf_443}
-"""
-            if node_ipv6:
-                report_text += f"""
-[🌐 Cloudflare CDN IPv6 Domain Node]
-URL: {node_ipv6}
-"""
-        report_text += f"""
---------------------------------------------------------------------------------
-4. Redundant Dual Clash Verge Rev Subscription URLs (ACL4SSR Rules Embedded)
---------------------------------------------------------------------------------
-1. 🔥 Primary Subscription (OnePage Sub-Convert Engine):
-{onepage_sub}
-
-2. 🛡️ Fallback Subscription (v1.mk Secondary Conversion Gateway):
-{fallback_sub}
-
---------------------------------------------------------------------------------
-5. Local Offline Artifacts Index
---------------------------------------------------------------------------------
-1. Report File  : {report_file}
-2. Clash Config : {offline_yaml_path} (Locally built, zero credential leak)
-3. Result JSON  : {os.path.join(output_dir, 'result.json')}
-4. QR PNGs      :
-   - Hysteria 2 : {png_hy2}
-   - Reality    : {png_reality}
-   - Std 443    : {png_cf_443 if domain else 'N/A'}
-================================================================================
-"""
-
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(report_text)
-
-    # Save structured machine-readable result.json
-    result_data = {
-        "status": "success",
-        "ip": ip,
+    profile = _str(cfg, "profile") or "legacy"
+    domain = _str(cfg, "domain").lower() or None
+    c = {
+        "ip": _str(cfg, "ip"),
+        "ssh_port": int(cfg.get("ssh_port") or 22),
+        "ssh_user": _str(cfg, "ssh_user") or "root",
+        "ssh_pass": cfg.get("ssh_pass") or None,
+        "ssh_key": os.path.expanduser(cfg["ssh_key"]) if cfg.get("ssh_key") else None,
+        "ssh_known_hosts": os.path.expanduser(cfg["ssh_known_hosts"]) if cfg.get("ssh_known_hosts") else None,
+        "profile": profile,
         "domain": domain,
-        "ipv6_domain": ipv6_domain,
-        "panel_url": panel_url,
-        "panel_user": panel_user,
-        "panel_pass": panel_pass,
-        "hy2_port": hy2_port,
-        "reality_port": reality_port,
-        "cf_port": cf_port,
-        "nodes": nodes,
-        "onepage_sub": onepage_sub,
-        "fallback_sub": fallback_sub,
-        "report_file": report_file,
-        "clash_yaml": offline_yaml_path,
-        "qr_pngs": {
-            "hy2": png_hy2,
-            "reality": png_reality,
-            "cf_443": png_cf_443
-        }
+        "ipv6": _str(cfg, "ipv6") or None,
+        "ipv6_domain": (_str(cfg, "ipv6_domain").lower() or None) if profile == "legacy" else None,
+        "panel_domain": _str(cfg, "panel_domain").lower() or None,
+        "reality_sni": _str(cfg, "reality_sni").lower() or DEFAULT_REALITY_SNI,
+        "client_isp": (_str(cfg, "client_isp") or "unicom").lower(),
+        "client_ip": _str(cfg, "client_ip") or "n/a",
+        "client_location": _str(cfg, "client_location") or "n/a",
+        "lang": (_str(cfg, "lang") or "en").lower(),
+        "output_dir": os.path.abspath(_str(cfg, "output_dir") or f"./output/{_str(cfg, 'ip')}"),
+        "panel_port": int(cfg["panel_port"]) if cfg.get("panel_port") else None,
+        "hy2_port": int(cfg["hy2_port"]) if cfg.get("hy2_port") else None,
+        "reality_port": int(cfg["reality_port"]) if cfg.get("reality_port") else None,
+        "web_backend_port": int(cfg.get("web_backend_port") or DEFAULT_BACKEND_PORT),
+        "panel_user": cfg.get("panel_user") or None,
+        "panel_pass": cfg.get("panel_pass") or None,
+        "panel_base_path": normalize_base_path(cfg["panel_base_path"]) if cfg.get("panel_base_path") else None,
+        "node_pass": cfg.get("node_pass") or None,
+        "obfs_password": cfg.get("obfs_password") or None,
+        "enable_hy2": _flag(cfg, "enable_hy2", profile == "legacy"),
+        "hy2_obfs": _flag(cfg, "hy2_obfs", True),
+        "node_prefix": cfg.get("node_prefix") or "srv",
+        "site_title": cfg.get("site_title") or (domain.split(".")[-2].capitalize() if domain else "Welcome"),
+        "site_description": cfg.get("site_description") or "Notes, drafts and small projects.",
+        "acme_email": (cfg.get("acme_email") or "").lower() or None,
+        "xui_version": cfg.get("xui_version") or None,
+        "reinstall_xui": _flag(cfg, "reinstall_xui", False),
+        "adopt_existing_panel": _flag(cfg, "adopt_existing_panel", False),
+        "stop_conflicting_services": _flag(cfg, "stop_conflicting_services", False),
+        "rotate_secrets": _flag(cfg, "rotate_secrets", False),
+        "online_sub": _flag(cfg, "online_sub", False),
+    }
+    return c
+
+
+# ---------------------------------------------------------------------------
+# Planning (pure: no network access)
+# ---------------------------------------------------------------------------
+
+def cert_domains(c: Dict[str, Any]) -> List[str]:
+    domains = [c["domain"], c["ipv6_domain"], c["panel_domain"]]
+    return list(dict.fromkeys(d for d in domains if d))
+
+
+def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
+               listeners: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """
+    Derive ports and secrets. Values stored in `state` are reused (stable client links and
+    firewall rules across re-runs) unless rotation is requested or an explicit override is set.
+    """
+    prev = dict(state or {})
+    listeners = listeners or []
+    rotate = c["rotate_secrets"]
+
+    def keep(key: str, generate):
+        return prev[key] if prev.get(key) and not rotate else generate()
+
+    s: Dict[str, Any] = {"version": 1, "profile": c["profile"]}
+    s["deploy_id"] = prev.get("deploy_id") or secrets.token_hex(4)
+    s["email"] = f"vps-skill-{s['deploy_id']}"
+    s["client_uuid"] = keep("client_uuid", lambda: str(uuid.uuid4()))
+    s["sub_id"] = keep("sub_id", lambda: secrets.token_hex(8))
+    s["node_pass"] = c["node_pass"] or keep("node_pass", lambda: generate_unambiguous_password(20))
+    s["obfs_password"] = c["obfs_password"] or keep("obfs_password", lambda: secrets.token_hex(12))
+    s["reality_short_id"] = keep("reality_short_id", lambda: secrets.token_hex(4))
+    s["panel_user"] = c["panel_user"] or keep("panel_user", lambda: "u" + generate_unambiguous_password(7))
+    s["panel_pass"] = c["panel_pass"] or keep("panel_pass", lambda: generate_unambiguous_password(20))
+    s["panel_base_path"] = c["panel_base_path"] or prev.get("panel_base_path") or random_path()
+    s["ws_path"] = prev.get("ws_path") or random_path(9).rstrip("/")
+    if not rotate:
+        s["reality_private_key"] = prev.get("reality_private_key", "")
+        s["reality_public_key"] = prev.get("reality_public_key", "")
+
+    reserved_tcp = {80, 443, c["ssh_port"], c["web_backend_port"]}
+
+    def tcp_busy(port: int) -> bool:
+        return bool(provision.port_users(listeners, "tcp", port))
+
+    def udp_busy(port: int) -> bool:
+        return bool(provision.port_users(listeners, "udp", port))
+
+    def choose(kind: str, proto: str, avoid: set) -> int:
+        explicit = c.get(f"{kind}_port")
+        if explicit:
+            foreign = provision.foreign_users(listeners, proto, explicit)
+            if foreign:
+                raise DeploymentError(f"{kind}_port {explicit}/{proto} is already used by: {', '.join(foreign)}")
+            return explicit
+        previous = prev.get(f"{kind}_port")
+        if previous and previous not in avoid and not provision.foreign_users(listeners, proto, previous):
+            return previous
+        return random_port(kind, avoid, tcp_busy if proto == "tcp" else udp_busy)
+
+    s["panel_port"] = choose("panel", "tcp", reserved_tcp)
+    if c["profile"] == "reality-self":
+        s["reality_port"] = 443
+    else:
+        s["reality_port"] = choose("reality", "tcp", reserved_tcp | {s["panel_port"]})
+    s["hy2_port"] = choose("hy2", "udp", set()) if c["enable_hy2"] else None
+
+    panel_public = bool(c["panel_domain"])
+    tcp_public: List[int] = []
+    if c["profile"] == "reality-self":
+        tcp_public += [80, 443]
+    else:
+        tcp_public.append(s["reality_port"])
+        if c["domain"]:
+            tcp_public += [80, 443]
+    if panel_public:
+        tcp_public.append(s["panel_port"])
+        if 80 not in tcp_public:
+            tcp_public.append(80)
+    s["public_tcp"] = sorted(set(tcp_public))
+    s["public_udp"] = [s["hy2_port"]] if s["hy2_port"] else []
+
+    return {
+        "state": s,
+        "previous_public_tcp": prev.get("public_tcp", []),
+        "previous_public_udp": prev.get("public_udp", []),
+        "panel_public": panel_public,
+        "cert_domains": cert_domains(c),
     }
 
-    result_json_file = os.path.join(output_dir, "result.json")
-    with open(result_json_file, "w", encoding="utf-8") as f:
-        json.dump(result_data, f, indent=2, ensure_ascii=False)
 
-    print(f"[+] Deployment complete! Archive generated at {output_dir}")
-    return result_data
+def web_conflicts(c: Dict[str, Any], listeners: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """
+    Return (units_to_stop, blocking_messages) for ports 80/443 (and the web backend port).
+    Unknown or non-web owners always block; known web servers are stopped only with explicit consent.
+    """
+    checks: List[Tuple[int, Tuple[str, ...]]] = []
+    if c["profile"] == "reality-self":
+        checks = [(443, ()), (80, ("nginx",)), (c["web_backend_port"], ("nginx",))]
+    elif c["domain"] or c["panel_domain"]:
+        checks = [(443, ()), (80, ())]
+    units, blocking = [], []
+    for port, allowed in checks:
+        for proc in provision.foreign_users(listeners, "tcp", port, allowed):
+            unit = provision.KNOWN_WEB_UNITS.get(proc)
+            if c["profile"] == "reality-self" and proc == "nginx":
+                blocking.append(f"nginx already serves TCP {port}; move existing sites to "
+                                f"127.0.0.1:{c['web_backend_port']} or use another IP")
+            elif unit and c["stop_conflicting_services"]:
+                units.append(unit)
+            else:
+                hint = " (re-run with --stop-conflicting-services to stop and disable it)" if unit else ""
+                blocking.append(f"TCP {port} is used by '{proc}'{hint}")
+    return sorted(set(units)), blocking
 
 
-def main():
+def build_inbounds(c: Dict[str, Any], s: Dict[str, Any], cert: Optional[Tuple[str, str]],
+                   hy2_cert: Optional[Tuple[str, str]]) -> List[Dict[str, Any]]:
+    identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
+    inbounds = []
+    if c["profile"] == "reality-self":
+        inbounds.append(reality_inbound(identity, 443, f"127.0.0.1:{c['web_backend_port']}", [c["domain"]],
+                                        s["reality_private_key"], s["reality_public_key"],
+                                        s["reality_short_id"], xver=1))
+    else:
+        if c["domain"] and cert:
+            inbounds.append(ws_inbound(identity, 443, c["domain"], s["ws_path"], cert[0], cert[1]))
+        inbounds.append(reality_inbound(identity, s["reality_port"], f"{c['reality_sni']}:443", [c["reality_sni"]],
+                                        s["reality_private_key"], s["reality_public_key"], s["reality_short_id"]))
+    if s["hy2_port"] and hy2_cert:
+        server_name = c["domain"] if cert and hy2_cert == cert else c["ip"]
+        inbounds.append(hy2_inbound(identity, s["hy2_port"], server_name, hy2_cert[0], hy2_cert[1],
+                                    s["obfs_password"] if c["hy2_obfs"] else None))
+    return inbounds
+
+
+def build_nodes(c: Dict[str, Any], s: Dict[str, Any], cert_ok: bool, hy2_pin: Optional[str]) -> List[Dict[str, Any]]:
+    prefix = c["node_prefix"]
+    nodes = []
+    if c["profile"] == "reality-self":
+        nodes.append(reality_node(prefix, s["client_uuid"], c["domain"], 443, c["domain"],
+                                  s["reality_public_key"], s["reality_short_id"]))
+    else:
+        nodes.append(reality_node(prefix, s["client_uuid"], c["ip"], s["reality_port"], c["reality_sni"],
+                                  s["reality_public_key"], s["reality_short_id"]))
+    if s["hy2_port"]:
+        obfs = s["obfs_password"] if c["hy2_obfs"] else None
+        if hy2_pin:
+            nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], pin_sha256=hy2_pin, obfs_password=obfs))
+        else:
+            nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], sni=c["domain"], obfs_password=obfs))
+    if c["profile"] == "legacy" and c["domain"] and cert_ok:
+        nodes += cdn_nodes(prefix, s["client_uuid"], c["domain"], s["ws_path"],
+                           CARRIER_CLEAN_IPS[c["client_isp"]], c["ipv6_domain"])
+    return nodes
+
+
+# ---------------------------------------------------------------------------
+# Remote execution
+# ---------------------------------------------------------------------------
+
+def _save_state(remote, state: Dict[str, Any]) -> None:
+    remote.run(provision.save_state_command(), input=json.dumps(state, indent=2), name="save deployment state")
+
+
+def _load_state(remote) -> Dict[str, Any]:
+    raw = remote.run(provision.load_state_command(), name="load deployment state").stdout.strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise DeploymentError("/etc/vps-skill/state.json is corrupt; fix or remove it before re-running.")
+
+
+def _print_plan(c: Dict[str, Any], plan: Dict[str, Any]) -> None:
+    s = plan["state"]
+    print(f"    Profile            : {c['profile']}")
+    print(f"    Target host        : {c['ssh_user']}@{c['ip']}:{c['ssh_port']}")
+    print(f"    Panel              : 127.0.0.1:{s['panel_port']} ({'public HTTPS via ' + c['panel_domain'] if plan['panel_public'] else 'loopback + SSH tunnel'})")
+    print(f"    REALITY (TCP)      : {s['reality_port']}"
+          + (f" -> target 127.0.0.1:{c['web_backend_port']} (Nginx website)" if c['profile'] == 'reality-self'
+             else f" -> target {c['reality_sni']}:443"))
+    print(f"    Hysteria 2 (UDP)   : {s['hy2_port'] or 'disabled'}")
+    print(f"    Public TCP / UDP   : {s['public_tcp']} / {s['public_udp']}")
+    if plan["cert_domains"]:
+        print(f"    Certificate SANs   : {', '.join(plan['cert_domains'])}")
+
+
+def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[str, Any]:
+    c = normalize_config(cfg)
+    print(f"[*] Target server: {c['ip']}:{c['ssh_port']} (user {c['ssh_user']}, profile {c['profile']})")
+
+    if dry_run:
+        plan = build_plan(c)
+        print("[!] DRY-RUN: input validated; no remote action taken. Server-side state, existing "
+              "listeners and stored secrets are not consulted, so ports below are provisional.")
+        _print_plan(c, plan)
+        s = plan["state"]
+        return {"status": "dry_run_success", "ip": c["ip"], "profile": c["profile"], "domain": c["domain"],
+                "panel_port": s["panel_port"], "reality_port": s["reality_port"], "hy2_port": s["hy2_port"],
+                "public_tcp": s["public_tcp"], "public_udp": s["public_udp"], "cert_domains": plan["cert_domains"],
+                "output_dir": c["output_dir"]}
+
+    remote = remote or SSHTarget(c["ip"], c["ssh_port"], c["ssh_user"], c["ssh_pass"], c["ssh_key"],
+                                 c["ssh_known_hosts"])
+    notes: List[str] = []
+
+    # Phase 1: preflight (read-only)
+    print("[*] Phase 1: Preflight inspection...")
+    info, listeners = provision.parse_preflight(remote.run_script("preflight", provision.preflight_script(),
+                                                                  timeout=30).stdout)
+    print(f"[+] {info.get('OS', 'unknown OS')} ({info.get('ARCH', '?')})")
+    state = _load_state(remote) if info.get("STATE") == "1" else {}
+    if info.get("XUI") == "1" and not state and not c["adopt_existing_panel"]:
+        raise DeploymentError("3X-UI is already installed but not managed by this skill. Re-run with "
+                              "--adopt-existing-panel to let the skill set panel credentials and manage "
+                              "its own 'vps-skill-*' inbounds (other inbounds are left untouched).")
+    units, blocking = web_conflicts(c, listeners)
+    if blocking:
+        raise DeploymentError("Port conflicts detected; nothing was changed:\n  - " + "\n  - ".join(blocking))
+    plan = build_plan(c, state, listeners)
+    s = plan["state"]
+    _print_plan(c, plan)
+    _save_state(remote, s)
+
+    # Phase 2: base system, optional service stop, firewall
+    print("[*] Phase 2: Packages, BBR and firewall...")
+    if units:
+        remote.run_script("stop conflicting services", provision.stop_units_script(units))
+        notes.append(f"Stopped and disabled on request: {', '.join(units)}")
+    prep = parse_kv(remote.run_script("system preparation",
+                                      provision.prep_script(["nginx"] if c["profile"] == "reality-self" else []),
+                                      timeout=900).stdout)
+    fw = parse_kv(remote.run_script("firewall", provision.firewall_script(
+        s["public_tcp"], s["public_udp"], plan["previous_public_tcp"], plan["previous_public_udp"])).stdout)
+    notes.append(f"BBR: {prep.get('BBR', 'unknown')}; firewall backend: {fw.get('FIREWALL', 'unknown')}"
+                 + ("" if fw.get("FIREWALL") != "iptables" or fw.get("FIREWALL_PERSISTED")
+                    else " (rules not persisted: install iptables-persistent/netfilter-persistent)"))
+
+    # Phase 3: certificates (+ website for reality-self)
+    cert: Optional[Tuple[str, str]] = None
+    nginx_version = ""
+    if c["profile"] == "reality-self":
+        nginx_version = remote.run("nginx -v 2>&1 | sed -n 's#.*nginx/\\([0-9.]*\\).*#\\1#p'",
+                                   name="nginx version").stdout.strip()
+        remote.run_script("nginx bootstrap", web_profile.nginx_apply_script(
+            web_profile.render_nginx_conf(plan["cert_domains"], c["web_backend_port"], nginx_version)))
+    if plan["cert_domains"]:
+        primary = plan["cert_domains"][0]
+        print(f"[*] Phase 3: Certificate for {', '.join(plan['cert_domains'])}...")
+        cert_dir = f"{CERT_ROOT}/{primary}"
+        if c["profile"] == "reality-self":
+            script = provision.cert_script(plan["cert_domains"], cert_dir, "webroot", "systemctl reload nginx",
+                                           webroot=web_profile.ACME_ROOT, email=c["acme_email"])
+        else:
+            script = provision.cert_script(plan["cert_domains"], cert_dir, "standalone",
+                                           "systemctl restart x-ui 2>/dev/null || true", email=c["acme_email"])
+        status = parse_kv(remote.run_script("certificate issuance", script, timeout=300).stdout)
+        cert = (f"{cert_dir}/fullchain.pem", f"{cert_dir}/privkey.pem")
+        print(f"[+] Certificate {status.get('CERT_STATUS', 'ok')}: {cert[0]}")
+    if c["profile"] == "reality-self":
+        remote.run_script("website deployment", web_profile.nginx_apply_script(
+            web_profile.render_nginx_conf(plan["cert_domains"], c["web_backend_port"], nginx_version, *cert),
+            web_profile.render_site(c["site_title"], c["site_description"])))
+
+    hy2_cert, hy2_pin = None, None
+    if s["hy2_port"]:
+        if cert and c["domain"]:
+            hy2_cert = cert
+        else:
+            out = parse_kv(remote.run_script("Hysteria 2 certificate", provision.hy2_self_signed_script(c["ip"])).stdout)
+            hy2_pin = out.get("HY2_PIN")
+            if not hy2_pin:
+                raise DeploymentError("Could not create the pinned Hysteria 2 certificate.")
+            hy2_cert = (f"{provision.HY2_SELF_SIGNED_DIR}/cert.pem", f"{provision.HY2_SELF_SIGNED_DIR}/key.pem")
+            notes.append("Hysteria 2 uses a self-signed certificate pinned by SHA-256 in the link/YAML; "
+                         "clients without pinning support cannot verify it.")
+
+    # Phase 4: 3X-UI installation and REALITY keys
+    print(f"[*] Phase 4: 3X-UI installation/configuration (panel port {s['panel_port']})...")
+    remote.run_script("3X-UI installation", provision.xui_install_script(
+        s["panel_user"], s["panel_pass"], s["panel_port"], s["panel_base_path"],
+        c["xui_version"], c["reinstall_xui"]), timeout=900)
+    if not s.get("reality_private_key") or not s.get("reality_public_key"):
+        priv, pub = provision.parse_x25519(remote.run_script("REALITY key generation", provision.x25519_script()).stdout)
+        if not priv or not pub:
+            raise DeploymentError("Failed to parse REALITY X25519 keys from `xray x25519` output.")
+        s["reality_private_key"], s["reality_public_key"] = priv, pub
+        _save_state(remote, s)
+
+    # Phase 5: inbound configuration (conflict-checked, backed up, transactional)
+    print("[*] Phase 5: Applying skill-owned inbounds...")
+    if plan["panel_public"]:
+        settings = {"webListen": "", "webCertFile": cert[0], "webKeyFile": cert[1]}
+    else:
+        settings = {"webListen": "127.0.0.1", "subListen": "127.0.0.1"}
+    inbounds = build_inbounds(c, s, cert, hy2_cert)
+    identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
+    res = remote.run_python("inbound configuration", REMOTE_DB_SCRIPT, build_db_payload(identity, inbounds, settings),
+                            check=False)
+    db = last_json_line(res.stdout) or {}
+    if not db.get("ok"):
+        detail = db.get("error") or (res.stderr.strip()[-400:] or "no output")
+        if db.get("conflicts"):
+            detail += ": " + ", ".join(f"inbound #{x['id']} '{x['tag']}' on {x['port']}/{x['transport']}"
+                                       for x in db["conflicts"])
+        raise DeploymentError(f"Inbound configuration failed: {detail}")
+    if db.get("disabled_stale"):
+        notes.append(f"Disabled skill-owned inbounds no longer in the plan: {', '.join(db['disabled_stale'])}")
+    if db.get("backup"):
+        notes.append(f"Database backup before changes: {db['backup']}")
+    remote.run(provision.restart_xui_command(), name="restart x-ui")
+
+    # Phase 6: verification
+    print("[*] Phase 6: Verifying listeners, panel login and website...")
+    tcp_ports = [s["panel_port"]] + [i["port"] for i in inbounds if i["transport"] == "tcp"]
+    udp_ports = [i["port"] for i in inbounds if i["transport"] == "udp"]
+    remote.run_script("listener verification", provision.verify_listeners_script(tcp_ports, udp_ports), timeout=60)
+    probe_res = remote.run_python("panel login verification", REMOTE_PROBE_SCRIPT, {
+        "port": s["panel_port"], "base_path": s["panel_base_path"], "user": s["panel_user"],
+        "password": s["panel_pass"], "host": c["panel_domain"] if plan["panel_public"] else None,
+    }, check=False)
+    probe = last_json_line(probe_res.stdout) or {}
+    if not probe.get("ok"):
+        raise DeploymentError("Panel login verification failed (credentials were not reset): "
+                              f"{probe.get('stage', '?')}: {probe.get('msg') or probe_res.stderr.strip()[-300:]}. "
+                              "If two-factor authentication is enabled on this panel, log in manually.")
+    if not probe.get("api_verified"):
+        notes.append("Panel login succeeded but the authenticated API check did not; verify the panel manually.")
+    if c["profile"] == "reality-self":
+        remote.run_script("website check", web_profile.site_check_script(c["domain"]))
+        print("[+] Port 443 serves the website to non-REALITY clients.")
+
+    # Phase 7: local artifacts (only after every check passed)
+    print("[*] Phase 7: Writing local artifacts...")
+    return _write_artifacts(c, plan, s, cert is not None, hy2_pin, probe, notes)
+
+
+def _write_artifacts(c, plan, s, cert_ok, hy2_pin, probe, notes) -> Dict[str, Any]:
+    out_dir = secure_dir(c["output_dir"])
+    nodes = build_nodes(c, s, cert_ok, hy2_pin)
+    files = {}
+    for node in nodes:
+        if node["qr"]:
+            png = os.path.join(out_dir, f"qr_{node['name']}.png")
+            node["ascii_qr"] = generate_qr(node["uri"], png)
+            os.chmod(png, 0o600)
+            files[f"QR {node['name']}"] = png
+
+    clash_path = write_secret(os.path.join(out_dir, "clash_config.yaml"),
+                              generate_local_clash_yaml(nodes, lang=c["lang"]))
+    files["Clash YAML"] = clash_path
+    online_subs = list(build_subscription_urls([n["uri"] for n in nodes])) if c["online_sub"] else []
+    if c["profile"] == "legacy":
+        notes.append(f"REALITY forwards unauthenticated connections to {c['reality_sni']}:443. Consider "
+                     "profile 'reality-self' (own domain + website on 443).")
+
+    scheme = probe.get("scheme", "http")
+    if plan["panel_public"]:
+        panel_url = f"https://{c['panel_domain']}:{s['panel_port']}{s['panel_base_path']}"
+        tunnel = None
+    else:
+        panel_url = f"{scheme}://127.0.0.1:{s['panel_port']}{s['panel_base_path']}"
+        tunnel = f"ssh -N -L {s['panel_port']}:127.0.0.1:{s['panel_port']} -p {c['ssh_port']} {c['ssh_user']}@{c['ip']}"
+    panel = {"url": panel_url, "user": s["panel_user"], "pass": s["panel_pass"], "public": plan["panel_public"],
+             "tunnel": tunnel, "api_verified": bool(probe.get("api_verified"))}
+
+    report_path = os.path.join(out_dir, f"vps_{c['ip']}_info.txt")
+    result_path = os.path.join(out_dir, "result.json")
+    files = {"Report": report_path, "Result JSON": result_path, **files}
+    ctx = {
+        "ip": c["ip"], "ipv6": c["ipv6"], "domain": c["domain"], "profile": c["profile"],
+        "client_isp": c["client_isp"], "client_location": c["client_location"], "client_ip": c["client_ip"],
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "ssh_port": c["ssh_port"], "ssh_user": c["ssh_user"], "panel": panel, "nodes": nodes,
+        "online_subs": online_subs, "files": files, "notes": notes,
+    }
+    write_secret(report_path, render_report(ctx, c["lang"]))
+    result = {
+        "status": "success",
+        "profile": c["profile"],
+        "ip": c["ip"],
+        "domain": c["domain"],
+        "ipv6_domain": c["ipv6_domain"],
+        "panel": panel,
+        "ports": {"panel": s["panel_port"], "reality": s["reality_port"], "hy2": s["hy2_port"],
+                  "public_tcp": s["public_tcp"], "public_udp": s["public_udp"]},
+        "nodes": [{"name": n["name"], "route": n["route"], "uri": n["uri"]} for n in nodes],
+        "online_subscriptions": online_subs,
+        "files": files,
+        "notes": notes,
+    }
+    write_secret_json(result_path, result)
+    print(f"[+] Deployment complete. Artifacts (owner-only) in {out_dir}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="VPS Multi-Protocol Deployment Automation Engine")
     parser.add_argument("--config", help="Path to JSON configuration file")
     parser.add_argument("--ip", help="Server IPv4 address")
-    parser.add_argument("--ssh-port", type=int, default=None, help="SSH port (default 22)")
-    parser.add_argument("--ssh-user", default=None, help="SSH username (default root)")
-    parser.add_argument("--ssh-pass", default=None, help="SSH password")
-    parser.add_argument("--ssh-key", default=None, help="Path to SSH private key file")
-    parser.add_argument("--ipv6", default=None, help="Server IPv6 address")
-    parser.add_argument("--domain", default=None, help="Server IPv4 domain name")
-    parser.add_argument("--ipv6-domain", default=None, help="Server IPv6 domain name")
-    parser.add_argument("--client-isp", default=None, help="User domestic carrier (unicom/mobile/telecom/overseas)")
-    parser.add_argument("--client-ip", default=None, help="Client outbound IP")
-    parser.add_argument("--client-location", default=None, help="Client geographical location")
-    parser.add_argument("--output-dir", default=None, help="Output directory to store txt and QR codes")
-    parser.add_argument("--lang", default=None, choices=["en", "zh"], help="Output language (default: en)")
-    parser.add_argument("--panel-port", type=int, default=None, help="Override 3X-UI panel port")
-    parser.add_argument("--hy2-port", type=int, default=None, help="Override Hysteria 2 UDP port")
-    parser.add_argument("--reality-port", type=int, default=None, help="Override VLESS-Reality TCP port")
-    parser.add_argument("--panel-domain", default=None, help="Dedicated domain for 3X-UI panel (default: None, raw IP HTTP mode)")
-    parser.add_argument("--dry-run", action="store_true", help="Validate and plan without executing remote actions")
-
-    args = parser.parse_args()
+    parser.add_argument("--ssh-port", type=int, help="SSH port (default 22)")
+    parser.add_argument("--ssh-user", help="SSH username (default root)")
+    parser.add_argument("--ssh-pass", help="SSH password (prefer the VPS_SSH_PASS env var or --config)")
+    parser.add_argument("--ssh-key", help="Path to SSH private key file")
+    parser.add_argument("--ssh-known-hosts", help="known_hosts file with the verified server key (disables TOFU)")
+    parser.add_argument("--profile", choices=PROFILES, help="Deployment profile (default legacy)")
+    parser.add_argument("--domain", help="Domain (legacy: Cloudflare-proxied for WS; reality-self: DNS-only)")
+    parser.add_argument("--ipv6", help="Server IPv6 address")
+    parser.add_argument("--ipv6-domain", help="IPv6 domain for an extra CDN node (legacy only)")
+    parser.add_argument("--panel-domain", help="Expose the panel publicly over HTTPS on this DNS-only domain")
+    parser.add_argument("--reality-sni", help=f"REALITY target/SNI for the legacy profile (default {DEFAULT_REALITY_SNI})")
+    parser.add_argument("--client-isp", choices=sorted(CARRIER_CLEAN_IPS), help="Client carrier (default unicom)")
+    parser.add_argument("--client-ip", help="Client outbound IP (report only)")
+    parser.add_argument("--client-location", help="Client location (report only)")
+    parser.add_argument("--output-dir", help="Local output directory (default ./output/<ip>)")
+    parser.add_argument("--lang", choices=["en", "zh"], help="Report language (default en)")
+    parser.add_argument("--panel-port", type=int, help="Override 3X-UI panel port")
+    parser.add_argument("--hy2-port", type=int, help="Override Hysteria 2 UDP port")
+    parser.add_argument("--reality-port", type=int, help="Override REALITY TCP port (legacy profile)")
+    parser.add_argument("--hy2", dest="enable_hy2", action=argparse.BooleanOptionalAction, default=None,
+                        help="Enable Hysteria 2 (default: on for legacy, off for reality-self)")
+    parser.add_argument("--node-prefix", help="Prefix for node names (default 'srv')")
+    parser.add_argument("--site-title", help="Website title (reality-self)")
+    parser.add_argument("--acme-email", help="Optional ACME account email")
+    parser.add_argument("--xui-version", help="Pin a 3X-UI release tag, e.g. v3.11.0")
+    parser.add_argument("--reinstall-xui", action="store_true", default=None, help="Re-run the 3X-UI installer")
+    parser.add_argument("--adopt-existing-panel", action="store_true", default=None,
+                        help="Manage a 3X-UI installation that was not set up by this skill")
+    parser.add_argument("--stop-conflicting-services", action="store_true", default=None,
+                        help="Stop and disable web servers occupying required ports")
+    parser.add_argument("--rotate-secrets", action="store_true", default=None,
+                        help="Generate new UUID, passwords and REALITY keys (invalidates old client links)")
+    parser.add_argument("--online-sub", action="store_true", default=None,
+                        help="Also print third-party converter subscription URLs (sends credentials to them)")
+    parser.add_argument("--dry-run", action="store_true", help="Validate and plan without remote actions")
+    args = parser.parse_args(argv)
 
     cfg: Dict[str, Any] = {}
     if args.config:
         with open(args.config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-
-    # CLI flags only override if explicitly supplied by user (not None)
-    for k, v in vars(args).items():
-        if k != "config" and v is not None:
-            cfg[k] = v
-
-    # Fallback defaults for any parameter still unset
-    cfg.setdefault("ssh_port", 22)
-    cfg.setdefault("ssh_user", "root")
-    cfg.setdefault("client_isp", "unicom")
-    cfg.setdefault("client_ip", "Generic Outbound")
-    cfg.setdefault("client_location", "Regional Metro")
-    cfg.setdefault("lang", "en")
+    for key, value in vars(args).items():
+        if key not in ("config", "dry_run") and value is not None:
+            cfg[key] = value
+    if not cfg.get("ssh_pass") and os.environ.get("VPS_SSH_PASS"):
+        cfg["ssh_pass"] = os.environ["VPS_SSH_PASS"]
 
     try:
         deploy_vps(cfg, dry_run=args.dry_run)

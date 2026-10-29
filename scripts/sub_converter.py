@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Subscription Converter Engine: Generates online Clash Verge Rev
-subscription URLs (via OnePage Sub-Convert) and downloads offline Clash YAML configurations.
+Online Subscription Converter URLs (opt-in only):
+Builds third-party converter URLs. The URLs embed every node credential and are
+sent to those services whenever a client imports or refreshes them, so the deployer
+only produces them with --online-sub. Prefer the locally generated clash_config.yaml.
 """
 import urllib.parse
-import urllib.request
-import os
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 DEFAULT_ACL4SSR_CONFIG = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_NoAuto.ini"
 ONEPAGE_API_BASE = "https://onepage.czl.net/api/sub-convert"
@@ -32,33 +32,6 @@ def build_subscription_urls(nodes: List[str], config_url: str = DEFAULT_ACL4SSR_
     fallback_url = f"{FALLBACK_API_BASE}?target=clash&new_name=true&url={encoded_nodes}&config={encoded_config}"
 
     return onepage_url, fallback_url
-
-
-def fetch_offline_clash_yaml(sub_url: str, output_yaml_path: Optional[str] = None, timeout: int = 15) -> str:
-    """
-    Fetch the converted Clash YAML configuration from subscription API and optionally save to disk.
-    
-    Args:
-        sub_url: Complete subscription URL.
-        output_yaml_path: Path to save the downloaded YAML file.
-        timeout: HTTP request timeout in seconds.
-        
-    Returns:
-        Downloaded YAML string content.
-    """
-    req = urllib.request.Request(
-        sub_url,
-        headers={"User-Agent": "ClashforWindows/0.20.39"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        content = resp.read().decode("utf-8")
-
-    if output_yaml_path:
-        os.makedirs(os.path.dirname(os.path.abspath(output_yaml_path)), exist_ok=True)
-        with open(output_yaml_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    return content
 
 
 if __name__ == "__main__":

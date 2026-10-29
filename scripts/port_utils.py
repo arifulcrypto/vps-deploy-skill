@@ -1,67 +1,46 @@
 #!/usr/bin/env python3
 """
 Port and Secret Utilities:
-Generates randomized high ports and secrets to prevent fingerprinting
-and avoid fixed port blocking.
+Random high-port selection that avoids ports already planned or in use, and
+generators for passwords, paths and identifiers.
 """
 import secrets
-import random
-from typing import Dict, Any
+from typing import Callable, Dict, Iterable, Tuple
 
-# Unambiguous Base58-like character set (strictly excludes 0, O, o, 1, l, I)
-UNAMBIGUOUS_CHARSET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+# Unambiguous charset: excludes 0/O/o and 1/l/I.
+UNAMBIGUOUS_CHARSET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz"
 
+PORT_RANGES: Dict[str, Tuple[int, int]] = {
+    "panel": (45000, 64000),
+    "hy2": (30000, 44999),
+    "reality": (20000, 29999),
+}
 
-def generate_unambiguous_password(length: int = 14, prefix: str = "Admin_") -> str:
-    """
-    Generate high-entropy password without visually confusing characters (0/O/o, 1/l/I).
-    Guarantees seamless manual browser input without font mistranscription.
-    """
-    random_chars = "".join(secrets.choice(UNAMBIGUOUS_CHARSET) for _ in range(length))
-    return f"{prefix}{random_chars}"
+_rng = secrets.SystemRandom()
 
 
-def generate_randomized_configs(
-    panel_port: int = None,
-    hy2_port: int = None,
-    reality_port: int = None,
-    panel_path: str = None,
-    obfs_pass: str = None,
-) -> Dict[str, Any]:
-    """
-    Generate randomized, non-colliding high ports and secret tokens.
-    """
-    # Random high ports
-    selected_panel_port = panel_port or random.randint(45000, 64000)
-    
-    # Ensure Hysteria 2 and Reality ports are distinct
-    selected_hy2_port = hy2_port or random.randint(30000, 44999)
-    selected_reality_port = reality_port or random.randint(20000, 29999)
-
-    # Random secret URL path for 3X-UI panel
-    selected_panel_path = panel_path or f"/{secrets.token_urlsafe(12)}/"
-    if not selected_panel_path.startswith("/"):
-        selected_panel_path = f"/{selected_panel_path}"
-    if not selected_panel_path.endswith("/"):
-        selected_panel_path = f"{selected_panel_path}/"
-
-    # Random salamander obfuscation password
-    selected_obfs = obfs_pass or secrets.token_hex(8)
-
-    # Random reality shortId
-    reality_short_id = secrets.token_hex(4)
-
-    return {
-        "panel_port": selected_panel_port,
-        "hy2_port": selected_hy2_port,
-        "reality_port": selected_reality_port,
-        "panel_base_path": selected_panel_path,
-        "obfs_password": selected_obfs,
-        "reality_short_id": reality_short_id,
-    }
+def generate_unambiguous_password(length: int = 16, prefix: str = "") -> str:
+    """High-entropy password that survives manual transcription and is URL-safe."""
+    return prefix + "".join(secrets.choice(UNAMBIGUOUS_CHARSET) for _ in range(length))
 
 
-if __name__ == "__main__":
-    cfg = generate_randomized_configs()
-    print("Randomized configuration sample:")
-    print(cfg)
+def random_port(kind: str, avoid: Iterable[int] = (), in_use: Callable[[int], bool] = lambda p: False,
+                attempts: int = 200) -> int:
+    """Pick a random port from the range for `kind` that is neither in `avoid` nor `in_use`."""
+    low, high = PORT_RANGES[kind]
+    avoid = set(avoid)
+    for _ in range(attempts):
+        port = _rng.randint(low, high)
+        if port not in avoid and not in_use(port):
+            return port
+    raise RuntimeError(f"no free {kind} port found in {low}-{high}")
+
+
+def random_path(nbytes: int = 12) -> str:
+    """Random URL path segment of URL-safe characters, e.g. '/Xy3_k-.../'."""
+    return f"/{secrets.token_urlsafe(nbytes)}/"
+
+
+def normalize_base_path(path: str) -> str:
+    path = path if path.startswith("/") else f"/{path}"
+    return path if path.endswith("/") else f"{path}/"

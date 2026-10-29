@@ -1,134 +1,67 @@
-# 🚀 VPS Deployer Skill（中文文档）
+# VPS Deployer Skill
 
-> **通用多协议 VPS 自动化部署与多机集群管理 Skill**  
-> *全面兼容 OpenAI GPTs、Anthropic Claude、Google Gemini / Antigravity 以及独立 CLI 命令行执行。*
+> 由 AI 智能体或命令行在 Linux VPS 上部署并维护 3X-UI 代理节点。
+> *支持 OpenAI GPTs、Anthropic Claude、Google Gemini / Antigravity 以及独立 CLI。*
 
-[English](./../README.md) | [中文说明](./README_zh.md)
-
----
-
-## 📌 项目概述
-
-**VPS Deployer Skill** 旨在帮助开发者与 AI 助手将任意 Linux 海外裸机 VPS 一键转变为高可用、抗封锁、去特征化的多协议代理节点，全程无需手动在 Web 界面中点击配置。
-
-### 跨境网络核心工程优化：
-* **动态非固定高端口**：防范 GFW 与运营商的主动探测。Hysteria 2、VLESS-Reality 与 3X-UI 控制面板全面采用动态分配随机高端口，并在部署时自动放行系统防火墙（`ufw` / `iptables`）。
-* **晚高峰骨干网抗丢包**：采用 **Hysteria 2** 协议，配合 QUIC BBR 与随机 Salamander 混淆，晚高峰 30% 丢包照样跑满千兆带宽。
-* **运营商海外 443 端口主动丢包绕过**：直连节点采用 **VLESS-Reality** 动态高 TCP 端口，借壳 Mozilla 官方证书与流量特征，1-RTT 极速握手。
-* **IP 阻断与审查免疫**：**VLESS-WS-TLS（443 端口）** 走 Cloudflare Anycast CDN，挂载三大运营商专属 **Clean Anycast 优选 IP**。
-* **IPv4/IPv6 双栈免报错**：自动签发双域名 Let's Encrypt ECC SAN 证书，彻底解决 IPv6 回源触发 Cloudflare 526 SSL 报错。
-* **双轨 Clash 订阅冗余交付**：自动输出 OnePage 主订阅与 v1.mk 备用订阅双链接（已内置 **ACL4SSR** 规则，国内流量 DIRECT 直连免流），并落盘离线 YAML 备份。
+[English](../README.md) | [中文说明](./README_zh.md)
 
 ---
 
-## 🏗️ 架构拓扑
+## 概览
 
-```mermaid
-flowchart TD
-    subgraph ClientLayer["客户端终端 (v2rayN / Clash Verge Rev / Mihomo)"]
-        User["国内用户网络终端"]
-    end
+- **两种方案**：`reality-self` 只使用 TCP 443——合法的 VLESS-REALITY-Vision 客户端走代理，其余连接经本机 Nginx 看到运营者自己的 HTTPS 网站；`legacy` 保留多端口布局（REALITY 随机高端口、可选 Hysteria 2、Cloudflare 后的 443 VLESS-WS-TLS）。
+- **失败即停止**：任何远程步骤、监听检查、面板登录探测或网站检查失败都不会生成报告、链接或二维码；ACME 失败直接报错，不会悄悄换成自签证书。
+- **默认无破坏**：不动已有 Web 服务、其他 3X-UI 入站与客户端、2FA 和面板证书；破坏性操作需显式开关。改库前备份并在单个事务中写入。
+- **重复部署稳定**：身份、密钥与端口保存在服务器 `/etc/vps-skill/state.json` 并复用；防火墙规则幂等管理（ufw、firewalld 或独立 iptables 链）。
+- **默认私有**：面板仅监听 `127.0.0.1`（SSH 隧道访问）；产物在 0700 目录中以 0600 写入；Clash YAML 本地生成，第三方转换需显式开启。
 
-    subgraph RuleEngine["ACL4SSR 智能分流引擎"]
-        Direct["国内流量 (GEOIP:CN) ──> DIRECT 本机直连免流"]
-        Reject["广告追踪 ──> 静默丢弃"]
-        Proxy["海外流量 ──> 节点代理组"]
-    end
+完整参数、执行流程与排错见 [`SKILL_zh.md`](./SKILL_zh.md)（以英文 [`SKILL.md`](../SKILL.md) 为准）。
 
-    subgraph Protocols["三大多协议 Inbound 并行共存"]
-        Hy2["🔥 Hysteria 2 (动态高 UDP)<br/>QUIC + BBR + Salamander 混淆"]
-        Reality["⚡ VLESS-Reality (动态高 TCP)<br/>XTLS Vision + Mozilla SNI"]
-        CleanIP["🌐 Cloudflare CDN (443 端口 TCP)<br/>三大运营商 Anycast 优选 Clean IP"]
-    end
-
-    subgraph TargetVPS["目标 VPS 宿主机 (Debian/Ubuntu)"]
-        XUI["3X-UI 核心引擎 (动态端口 + 随机安全路径)"]
-        Cert["双域名 Let's Encrypt ECC SAN 证书"]
-        BBR["Linux 内核 BBR 拥塞控制"]
-        FW["自动防火墙放行 (ufw / iptables)"]
-    end
-
-    User --> RuleEngine
-    Proxy --> Hy2
-    Proxy --> Reality
-    Proxy --> CleanIP
-    Hy2 --> XUI
-    Reality --> XUI
-    CleanIP --> XUI
-    XUI --> TargetVPS
-```
-
----
-
-## ⚡ 快速上手
-
-### 1. 独立命令行调用
-
-克隆本仓库并安装轻量依赖：
+## 快速开始
 
 ```bash
 git clone https://github.com/arifulcrypto/vps-deploy-skill.git
 cd vps-deploy-skill
-pip install -r requirements.txt
+pip install -r requirements.txt          # 密码登录需本机安装 openssh-client 与 sshpass
+
+# 1. 仅生成计划（不改动服务器）
+python3 scripts/vps_deployer.py --config examples/input_reality_self.json --dry-run
+
+# 2. 正式部署（密码通过环境变量传入，避免出现在进程参数中）
+VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reality_self.json
 ```
 
-一条命令驱动全量部署（端口将自动随机生成，防主动探测）：
+`reality-self` 需要一个指向 VPS 的 **仅 DNS（灰云）** A 记录。常用参数：
 
-```bash
-python3 scripts/vps_deployer.py \
-  --ip 198.51.100.1 \
-  --ssh-port 22 \
-  --ssh-user root \
-  --ssh-pass "your_secure_password" \
-  --domain "node.yourdomain.com" \
-  --ipv6-domain "ipv6.yourdomain.com" \
-  --client-isp "unicom" \
-  --client-location "区域中心城市" \
-  --output-dir "./output/node1" \
-  --lang en
-```
+| 参数 | 作用 |
+| :--- | :--- |
+| `--profile {legacy,reality-self}` | 部署方案（默认 `legacy`） |
+| `--domain`、`--ipv6-domain`、`--panel-domain` | 域名（各方案的 DNS 模式见 SKILL） |
+| `--hy2 / --no-hy2` | 开关 Hysteria 2 |
+| `--ssh-key`、`--ssh-known-hosts` | 密钥登录；预置主机指纹，替代首次信任 |
+| `--xui-version v3.11.0` | 固定 3X-UI 版本 |
+| `--adopt-existing-panel` | 接管非本 Skill 安装的 3X-UI |
+| `--stop-conflicting-services` | 停止并禁用占用 80/443 的 Web 服务 |
+| `--rotate-secrets` | 生成新的 UUID/密码/REALITY 密钥（旧链接失效） |
+| `--online-sub` | 额外输出第三方订阅转换链接（会把凭据发送给对方） |
 
-或使用 JSON 配置文件直接加载：
-
-```bash
-python3 scripts/vps_deployer.py --config examples/input_full.json
-```
-
----
-
-## 🤖 多模型 AI 平台适配指南
-
-| AI 模型 / Agent 平台 | 适配文件 | 使用方式 |
-| :--- | :--- | :--- |
-| **Google Antigravity / Gemini CLI** | [`SKILL.md`](./../SKILL.md) / [`.agents/skills/vps-deployer/`](./../.agents/skills/vps-deployer/) | 直接放置于项目根目录，Antigravity 自动识别为可用 Skill |
-| **Anthropic Claude (Desktop / Code)** | [`claude/system_prompt.zh.md`](./../claude/system_prompt.zh.md) | 作为 System Prompt 或项目知识库挂载 |
-| **OpenAI (Custom GPTs / Assistants)** | [`openai/gpt_instructions.zh.md`](./../openai/gpt_instructions.zh.md) | 粘贴到 GPTs 指令中，导入 [`openai/actions_schema.json`](./../openai/actions_schema.json) 实现 Action 调用 |
-
----
-
-## 📂 自动化落盘资产目录结构
-
-每台部署完毕的主机将生成独立的归档文件夹：
+## 输出
 
 ```text
-output/198.51.100.1/
-├── vps_198.51.100.1_info.txt   # 结构化说明文档 + 内嵌终端 ASCII 二维码
-├── clash_config.yaml           # 离线 Clash 配置文件（已内置 ACL4SSR 规则）
-├── node_hy2_qr.png             # Hysteria 2 高清二维码
-├── node_reality_qr.png         # VLESS-Reality 高清二维码
-└── node_cf_443_qr.png          # Cloudflare 443 高清二维码
+output/<ip>/                 （目录 0700，文件 0600——包含凭据）
+├── vps_<ip>_info.txt        报告（链接与终端二维码）
+├── result.json              机器可读结果
+├── clash_config.yaml        本地 Clash/Mihomo 配置
+└── qr_<节点>.png             二维码
 ```
 
-### 双轨 Clash Verge Rev 订阅直出
-自动为客户端输出双轨订阅链接，提供主备冗余：
-1. **主通道 (OnePage 在线转换)**:
-   `https://onepage.czl.net/api/sub-convert?target=clash&url=<ENCODED_NODES>&config=<ACL4SSR_CONFIG>`
-2. **备用通道 (v1.mk 备用网关)**:
-   `https://api.v1.mk/sub?target=clash&new_name=true&url=<ENCODED_NODES>&config=<ACL4SSR_CONFIG>`
-3. **离线本地 YAML**: 保存为 `clash_config.yaml` 供离线直接导入。
+## 开发
 
----
+```bash
+pip install -r requirements-dev.txt
+ruff check scripts tests && pytest -q
+```
 
-## 📄 开源许可证
+## 许可证
 
-本项目基于 MIT License 协议开源。详情见 [LICENSE](./../LICENSE)。
+MIT，详见 [LICENSE](../LICENSE)。

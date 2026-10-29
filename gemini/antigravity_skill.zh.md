@@ -1,19 +1,12 @@
-# Gemini / Google Antigravity Skill 指南（中文版）
+# Gemini / Google Antigravity Skill 指南（中文）
 
-本文档定义了在 **Google Antigravity** 智能编码助手或 Gemini CLI 中激活并调用 `vps-deployer` Skill 的核心执行流程。
+Skill 通过 [`.agents/skills/vps-deployer/SKILL.md`](../.agents/skills/vps-deployer/SKILL.md) 自动发现（链接到根目录 [`SKILL.md`](../SKILL.md)，以其为准）。
 
-## 会话中执行协议
-1. **智能参数提取**：
-   当用户以非结构化方式输入时，自动识别并提取主机 IP、SSH 端口、密码、可选域名、以及用户国内运营商归属。
-2. **动态非固定高端口**：
-   - 随机分配 Hysteria 2 UDP 端口（`30000-44999`）。
-   - 随机分配 VLESS-Reality TCP 端口（`20000-29999`）。
-   - 随机分配 3X-UI 面板端口（`45000-64000`）及随机安全路径。
-   - 自动在目标主机上注入防火墙白名单放行规则。
-3. **自动化工具链调用**：
-   - 优先探测远端环境，发现占用端口的旧进程及时清理。
-   - 调用 `python3 scripts/vps_deployer.py` 驱动全量端到端部署。
-4. **Artifact 产物沉淀与双轨订阅**：
-   - 在 Artifacts 目录生成完整报告 Markdown，并嵌入高清二维码图片（`![alt](/absolute/path)`）。
-   - 输出标准的双轨 Clash Verge Rev 订阅链接（OnePage 主通道 + v1.mk 备用通道）。
-   - 默认输出语言为英文（`en`），指定中文时输出中文。
+## 会话执行流程
+1. 从对话中提取 `ip`、SSH 端口/用户/凭据、可选域名与运营商；缺失项向用户询问。
+2. 与用户确定方案（`reality-self` 需要灰云域名，否则用 `legacy`），写入配置 JSON，执行 `python3 scripts/vps_deployer.py --config <file> --dry-run`，展示计划并等待确认。
+3. 使用 `run_command` 执行部署。不要对服务器执行临时的 `sshpass`/`systemctl`/`pkill` 命令，也不要自行修改面板数据库。
+4. `--adopt-existing-panel`、`--stop-conflicting-services`、`--rotate-secrets`、`--online-sub` 仅在用户明确同意后使用。
+5. 成功后根据 `result.json` 生成 Markdown 产物，包含面板访问方式、节点链接与二维码图片（`![node](/绝对路径/qr_<node>.png)`），并提示其中含有凭据；失败时汇报 `[ERROR]` 信息与 SKILL 排错条目。
+
+默认输出英文（`en`）。
