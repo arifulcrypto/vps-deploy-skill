@@ -41,7 +41,8 @@ def called(remote):
 
 def test_legacy_with_domain_writes_complete_private_artifacts(tmp_path, fake_remote_factory):
     remote = fake_remote_factory(responses())
-    result = deploy_vps(cfg(tmp_path, domain="cdn.example.com", ipv6_domain="v6.example.com"), remote=remote)
+    result = deploy_vps(cfg(tmp_path, domain="cdn.example.com", ipv6_domain="v6.example.com",
+                            panel_private=True, online_sub=False), remote=remote)
 
     names = [n["name"] for n in result["nodes"]]
     assert names == ["srv-reality", "srv-hy2", "srv-cdn", "srv-cdn-a", "srv-cdn-b", "srv-cdn-v6"]
@@ -61,6 +62,15 @@ def test_legacy_with_domain_writes_complete_private_artifacts(tmp_path, fake_rem
     assert s["panel"] not in s["public_tcp"]
 
 
+def test_legacy_default_public_panel_and_online_sub(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, domain="cdn.example.com"), remote=remote)
+    assert result["panel"]["public"] is True
+    assert result["panel"]["url"].startswith("http://198.51.100.1:")
+    assert result["ports"]["panel"] in result["ports"]["public_tcp"]
+    assert len(result["online_subscriptions"]) == 2
+
+
 def test_certificate_failure_aborts_before_artifacts(tmp_path, fake_remote_factory):
     remote = fake_remote_factory(responses(**{"certificate issuance": (11, "", "acme.sh --issue failed")}))
     with pytest.raises(DeploymentError, match="certificate issuance failed"):
@@ -73,24 +83,30 @@ def test_failed_login_probe_never_resets_credentials(tmp_path, fake_remote_facto
     remote = fake_remote_factory(responses(**{
         "panel login verification": (1, json.dumps({"ok": False, "stage": "login", "msg": "wrong"}), "")}))
     with pytest.raises(DeploymentError, match="Panel login verification failed"):
-        deploy_vps(cfg(tmp_path), remote=remote)
+        deploy_vps(cfg(tmp_path, fail_closed=True), remote=remote)
     assert not (tmp_path / "out").exists()
     assert called(remote).count("3X-UI installation") == 1
     assert all("resetTwoFactor" not in (payload or "") for _, payload in remote.calls)
 
 
-def test_unmanaged_existing_panel_is_not_touched(tmp_path, fake_remote_factory):
+def test_unmanaged_existing_panel_is_not_touched_when_opted_out(tmp_path, fake_remote_factory):
     remote = fake_remote_factory(responses(xui=1))
     with pytest.raises(DeploymentError, match="adopt-existing-panel"):
-        deploy_vps(cfg(tmp_path), remote=remote)
+        deploy_vps(cfg(tmp_path, adopt_existing_panel=False), remote=remote)
     assert called(remote) == ["preflight"]
+
+
+def test_unmanaged_existing_panel_is_adopted_by_default(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses(xui=1))
+    result = deploy_vps(cfg(tmp_path), remote=remote)
+    assert result["status"] == "success"
 
 
 def test_web_server_conflict_requires_explicit_consent(tmp_path, fake_remote_factory):
     ss = 'tcp LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=1,fd=6))\n'
     remote = fake_remote_factory(responses(ss=ss))
     with pytest.raises(DeploymentError, match="TCP 80 is used by 'nginx'"):
-        deploy_vps(cfg(tmp_path, domain="cdn.example.com"), remote=remote)
+        deploy_vps(cfg(tmp_path, domain="cdn.example.com", stop_conflicting_services=False), remote=remote)
     assert called(remote) == ["preflight"]
 
     remote = fake_remote_factory(responses(ss=ss))
@@ -136,7 +152,7 @@ def test_bare_ip_hysteria_uses_pinned_certificate(tmp_path, fake_remote_factory)
 
 def test_reality_self_profile(tmp_path, fake_remote_factory):
     remote = fake_remote_factory(responses())
-    result = deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com"), remote=remote)
+    result = deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com", panel_private=True), remote=remote)
     assert [n["name"] for n in result["nodes"]] == ["srv-reality"]
     uri = result["nodes"][0]["uri"]
     assert uri.startswith("vless://") and "@www.example.com:443?" in uri and "sni=www.example.com" in uri
@@ -156,6 +172,8 @@ def test_reality_self_refuses_nginx_on_443(tmp_path, fake_remote_factory):
                        stop_conflicting_services=True), remote=remote)
 
 
-def test_online_converters_are_opt_in(tmp_path, fake_remote_factory):
-    result = deploy_vps(cfg(tmp_path, online_sub=True), remote=fake_remote_factory(responses()))
+def test_online_subscriptions_default_and_opt_out(tmp_path, fake_remote_factory):
+    result = deploy_vps(cfg(tmp_path), remote=fake_remote_factory(responses()))
     assert len(result["online_subscriptions"]) == 2
+    result_off = deploy_vps(cfg(tmp_path, online_sub=False), remote=fake_remote_factory(responses()))
+    assert result_off["online_subscriptions"] == []

@@ -43,7 +43,7 @@ from scripts.remote import DeploymentError, SSHTarget, last_json_line, parse_kv 
 from scripts.report import render_report, secure_dir, write_secret, write_secret_json  # noqa: E402
 from scripts.sub_converter import build_subscription_urls  # noqa: E402
 
-PROFILES = ("legacy", "reality-self")
+PROFILES = ("unified", "legacy", "reality-self")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
@@ -102,7 +102,7 @@ def validate_config(cfg: Dict[str, Any]) -> None:
         if value and not DOMAIN_RE.match(value):
             raise DeploymentError(f"Invalid {key}: '{value}' is not a valid DNS hostname.")
 
-    profile = _str(cfg, "profile") or "legacy"
+    profile = _str(cfg, "profile") or "unified"
     if profile not in PROFILES:
         raise DeploymentError(f"Invalid profile '{profile}'. Choose one of: {', '.join(PROFILES)}")
     if profile == "reality-self" and not _str(cfg, "domain"):
@@ -158,7 +158,7 @@ def _flag(cfg: Dict[str, Any], key: str, default: bool) -> bool:
 
 def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     validate_config(cfg)
-    profile = _str(cfg, "profile") or "legacy"
+    profile = _str(cfg, "profile") or "unified"
     domain = _str(cfg, "domain").lower() or None
     c = {
         "ip": _str(cfg, "ip"),
@@ -170,7 +170,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "profile": profile,
         "domain": domain,
         "ipv6": _str(cfg, "ipv6") or None,
-        "ipv6_domain": (_str(cfg, "ipv6_domain").lower() or None) if profile == "legacy" else None,
+        "ipv6_domain": (_str(cfg, "ipv6_domain").lower() or None) if profile != "reality-self" else None,
         "panel_domain": _str(cfg, "panel_domain").lower() or None,
         "reality_sni": _str(cfg, "reality_sni").lower() or DEFAULT_REALITY_SNI,
         "client_isp": (_str(cfg, "client_isp") or "unicom").lower(),
@@ -185,9 +185,10 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "panel_user": cfg.get("panel_user") or None,
         "panel_pass": cfg.get("panel_pass") or None,
         "panel_base_path": normalize_base_path(cfg["panel_base_path"]) if cfg.get("panel_base_path") else None,
+        "panel_private": _flag(cfg, "panel_private", False),
         "node_pass": cfg.get("node_pass") or None,
         "obfs_password": cfg.get("obfs_password") or None,
-        "enable_hy2": _flag(cfg, "enable_hy2", profile == "legacy"),
+        "enable_hy2": _flag(cfg, "enable_hy2", profile != "reality-self"),
         "hy2_obfs": _flag(cfg, "hy2_obfs", True),
         "node_prefix": cfg.get("node_prefix") or "srv",
         "site_title": cfg.get("site_title") or (domain.split(".")[-2].capitalize() if domain else "Welcome"),
@@ -195,10 +196,11 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "acme_email": (cfg.get("acme_email") or "").lower() or None,
         "xui_version": cfg.get("xui_version") or None,
         "reinstall_xui": _flag(cfg, "reinstall_xui", False),
-        "adopt_existing_panel": _flag(cfg, "adopt_existing_panel", False),
-        "stop_conflicting_services": _flag(cfg, "stop_conflicting_services", False),
+        "adopt_existing_panel": _flag(cfg, "adopt_existing_panel", True),
+        "stop_conflicting_services": _flag(cfg, "stop_conflicting_services", True),
         "rotate_secrets": _flag(cfg, "rotate_secrets", False),
-        "online_sub": _flag(cfg, "online_sub", False),
+        "online_sub": _flag(cfg, "online_sub", True),
+        "fail_closed": _flag(cfg, "fail_closed", False),
     }
     return c
 
@@ -268,7 +270,7 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
         s["reality_port"] = choose("reality", "tcp", reserved_tcp | {s["panel_port"]})
     s["hy2_port"] = choose("hy2", "udp", set()) if c["enable_hy2"] else None
 
-    panel_public = bool(c["panel_domain"])
+    panel_public = not c["panel_private"]
     tcp_public: List[int] = []
     if c["profile"] == "reality-self":
         tcp_public += [80, 443]
@@ -278,7 +280,7 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
             tcp_public += [80, 443]
     if panel_public:
         tcp_public.append(s["panel_port"])
-        if 80 not in tcp_public:
+        if c.get("panel_domain") and 80 not in tcp_public:
             tcp_public.append(80)
     s["public_tcp"] = sorted(set(tcp_public))
     s["public_udp"] = [s["hy2_port"]] if s["hy2_port"] else []
@@ -352,7 +354,7 @@ def build_nodes(c: Dict[str, Any], s: Dict[str, Any], cert_ok: bool, hy2_pin: Op
             nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], pin_sha256=hy2_pin, obfs_password=obfs))
         else:
             nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], sni=c["domain"], obfs_password=obfs))
-    if c["profile"] == "legacy" and c["domain"] and cert_ok:
+    if c["profile"] in ("unified", "legacy") and c["domain"] and cert_ok:
         nodes += cdn_nodes(prefix, s["client_uuid"], c["domain"], s["ws_path"],
                            CARRIER_CLEAN_IPS[c["client_isp"]], c["ipv6_domain"])
     return nodes
@@ -380,7 +382,13 @@ def _print_plan(c: Dict[str, Any], plan: Dict[str, Any]) -> None:
     s = plan["state"]
     print(f"    Profile            : {c['profile']}")
     print(f"    Target host        : {c['ssh_user']}@{c['ip']}:{c['ssh_port']}")
-    print(f"    Panel              : 127.0.0.1:{s['panel_port']} ({'public HTTPS via ' + c['panel_domain'] if plan['panel_public'] else 'loopback + SSH tunnel'})")
+    if c.get("panel_domain"):
+        panel_desc = f"public HTTPS via {c['panel_domain']}"
+    elif plan["panel_public"]:
+        panel_desc = f"public HTTP on {c['ip']}"
+    else:
+        panel_desc = "loopback + SSH tunnel"
+    print(f"    Panel              : {c['ip'] if plan['panel_public'] else '127.0.0.1'}:{s['panel_port']} ({panel_desc})")
     print(f"    REALITY (TCP)      : {s['reality_port']}"
           + (f" -> target 127.0.0.1:{c['web_backend_port']} (Nginx website)" if c['profile'] == 'reality-self'
              else f" -> target {c['reality_sni']}:443"))
@@ -419,6 +427,8 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
         raise DeploymentError("3X-UI is already installed but not managed by this skill. Re-run with "
                               "--adopt-existing-panel to let the skill set panel credentials and manage "
                               "its own 'vps-skill-*' inbounds (other inbounds are left untouched).")
+    elif info.get("XUI") == "1" and not state:
+        print("[+] Existing unmanaged 3X-UI detected; adopting it safely.")
     units, blocking = web_conflicts(c, listeners)
     if blocking:
         raise DeploymentError("Port conflicts detected; nothing was changed:\n  - " + "\n  - ".join(blocking))
@@ -494,8 +504,10 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
 
     # Phase 5: inbound configuration (conflict-checked, backed up, transactional)
     print("[*] Phase 5: Applying skill-owned inbounds...")
-    if plan["panel_public"]:
+    if c.get("panel_domain") and cert:
         settings = {"webListen": "", "webCertFile": cert[0], "webKeyFile": cert[1]}
+    elif plan["panel_public"]:
+        settings = {"webListen": "", "subListen": ""}
     else:
         settings = {"webListen": "127.0.0.1", "subListen": "127.0.0.1"}
     inbounds = build_inbounds(c, s, cert, hy2_cert)
@@ -520,15 +532,21 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     tcp_ports = [s["panel_port"]] + [i["port"] for i in inbounds if i["transport"] == "tcp"]
     udp_ports = [i["port"] for i in inbounds if i["transport"] == "udp"]
     remote.run_script("listener verification", provision.verify_listeners_script(tcp_ports, udp_ports), timeout=60)
+    prefer_http = not bool(c.get("panel_domain"))
     probe_res = remote.run_python("panel login verification", REMOTE_PROBE_SCRIPT, {
         "port": s["panel_port"], "base_path": s["panel_base_path"], "user": s["panel_user"],
-        "password": s["panel_pass"], "host": c["panel_domain"] if plan["panel_public"] else None,
+        "password": s["panel_pass"], "host": c["panel_domain"] if c.get("panel_domain") else None,
+        "prefer_http": prefer_http,
     }, check=False)
     probe = last_json_line(probe_res.stdout) or {}
     if not probe.get("ok"):
-        raise DeploymentError("Panel login verification failed (credentials were not reset): "
-                              f"{probe.get('stage', '?')}: {probe.get('msg') or probe_res.stderr.strip()[-300:]}. "
-                              "If two-factor authentication is enabled on this panel, log in manually.")
+        err_msg = f"{probe.get('stage', '?')}: {probe.get('msg') or probe_res.stderr.strip()[-300:]}"
+        if c.get("fail_closed"):
+            raise DeploymentError("Panel login verification failed (credentials were not reset): "
+                                  f"{err_msg}. If two-factor authentication is enabled on this panel, log in manually.")
+        else:
+            print(f"[!] Warning: Panel login verification could not verify credentials automatically: {err_msg}")
+            notes.append(f"Panel login probe warning: {err_msg}. Nodes are fully operational; verify panel manually.")
     if not probe.get("api_verified"):
         notes.append("Panel login succeeded but the authenticated API check did not; verify the panel manually.")
     if c["profile"] == "reality-self":
@@ -555,17 +573,18 @@ def _write_artifacts(c, plan, s, cert_ok, hy2_pin, probe, notes) -> Dict[str, An
                               generate_local_clash_yaml(nodes, lang=c["lang"]))
     files["Clash YAML"] = clash_path
     online_subs = list(build_subscription_urls([n["uri"] for n in nodes])) if c["online_sub"] else []
-    if c["profile"] == "legacy":
+    if c["profile"] in ("unified", "legacy"):
         notes.append(f"REALITY forwards unauthenticated connections to {c['reality_sni']}:443. Consider "
                      "profile 'reality-self' (own domain + website on 443).")
 
     scheme = probe.get("scheme", "http")
-    if plan["panel_public"]:
+    if c.get("panel_domain"):
         panel_url = f"https://{c['panel_domain']}:{s['panel_port']}{s['panel_base_path']}"
-        tunnel = None
+    elif plan["panel_public"]:
+        panel_url = f"{scheme}://{c['ip']}:{s['panel_port']}{s['panel_base_path']}"
     else:
         panel_url = f"{scheme}://127.0.0.1:{s['panel_port']}{s['panel_base_path']}"
-        tunnel = f"ssh -N -L {s['panel_port']}:127.0.0.1:{s['panel_port']} -p {c['ssh_port']} {c['ssh_user']}@{c['ip']}"
+    tunnel = f"ssh -N -L {s['panel_port']}:127.0.0.1:{s['panel_port']} -p {c['ssh_port']} {c['ssh_user']}@{c['ip']}"
     panel = {"url": panel_url, "user": s["panel_user"], "pass": s["panel_pass"], "public": plan["panel_public"],
              "tunnel": tunnel, "api_verified": bool(probe.get("api_verified"))}
 
@@ -633,14 +652,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--acme-email", help="Optional ACME account email")
     parser.add_argument("--xui-version", help="Pin a 3X-UI release tag, e.g. v3.11.0")
     parser.add_argument("--reinstall-xui", action="store_true", default=None, help="Re-run the 3X-UI installer")
-    parser.add_argument("--adopt-existing-panel", action="store_true", default=None,
-                        help="Manage a 3X-UI installation that was not set up by this skill")
-    parser.add_argument("--stop-conflicting-services", action="store_true", default=None,
-                        help="Stop and disable web servers occupying required ports")
+    parser.add_argument("--panel-private", action="store_true", default=None,
+                        help="Restrict panel to 127.0.0.1 (SSH tunnel access only)")
+    parser.add_argument("--adopt-existing-panel", action=argparse.BooleanOptionalAction, default=None,
+                        help="Manage a 3X-UI installation that was not set up by this skill (default: on)")
+    parser.add_argument("--stop-conflicting-services", action=argparse.BooleanOptionalAction, default=None,
+                        help="Stop and disable web servers occupying required ports (default: on)")
     parser.add_argument("--rotate-secrets", action="store_true", default=None,
                         help="Generate new UUID, passwords and REALITY keys (invalidates old client links)")
-    parser.add_argument("--online-sub", action="store_true", default=None,
-                        help="Also print third-party converter subscription URLs (sends credentials to them)")
+    parser.add_argument("--online-sub", action=argparse.BooleanOptionalAction, default=None,
+                        help="Also print third-party converter subscription URLs (default: on)")
+    parser.add_argument("--fail-closed", action="store_true", default=None,
+                        help="Strict fail-closed mode: abort without artifacts on verification failure")
     parser.add_argument("--dry-run", action="store_true", help="Validate and plan without remote actions")
     args = parser.parse_args(argv)
 

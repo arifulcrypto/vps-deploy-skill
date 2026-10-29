@@ -51,7 +51,8 @@ def attempt(scheme):
 
 
 errors = []
-for scheme in ("https", "http"):
+schemes = ("http", "https") if cfg.get("prefer_http", True) else ("https", "http")
+for scheme in schemes:
     try:
         res = attempt(scheme)
     except Exception as exc:

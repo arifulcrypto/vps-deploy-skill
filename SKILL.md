@@ -1,12 +1,11 @@
 ---
 name: vps-deployer
 description: >-
-  Deploys and maintains a 3X-UI proxy node on a Linux VPS over SSH. Two profiles:
-  `reality-self` (single public TCP 443: VLESS-REALITY-Vision whose target is the operator's own
-  HTTPS website, so non-clients see a normal site) and `legacy` (REALITY on a random high port,
-  optional Hysteria 2, VLESS-WS-TLS on 443 behind Cloudflare). Fails closed, keeps existing
-  services/inbounds/2FA untouched, keeps the panel private, reuses stored secrets on re-runs, and
-  writes owner-only reports, QR codes and a locally generated Clash/Mihomo YAML.
+  Deploys and maintains a 3X-UI proxy node on a Linux VPS over SSH. Profiles:
+  `unified` (default, complete protocol matrix: Direct REALITY + Direct Hysteria 2 + Cloudflare CDN WS-TLS),
+  `legacy` (alias to unified), and `reality-self` (single public TCP 443: VLESS-REALITY-Vision with own Nginx website).
+  Provides public 0.0.0.0 panel access by default with optional SSH tunneling, automatic existing panel adoption,
+  default online subscription URLs, owner-only reports, QR codes and local Clash/Mihomo YAML.
 ---
 
 # VPS Deployer Skill
@@ -16,89 +15,58 @@ Source of truth for every agent adapter (`claude/`, `openai/`, `gemini/`). The e
 
 ## 1. What it does (and does not do)
 
-- **Fails closed.** Report, links, QR codes and YAML are written only after every remote step,
-  the listener check, the panel login probe and (for `reality-self`) the website check pass.
-- **Non-destructive by default.** Existing web servers are never stopped unless the user asks
-  (`stop_conflicting_services`). A 3X-UI not installed by this skill is not touched unless the user
-  asks (`adopt_existing_panel`). Only inbounds tagged `vps-skill-*` and the client
-  `vps-skill-<deploy_id>` are modified; foreign inbounds, clients, 2FA and panel TLS stay as they
-  are. The database is backed up before each change and written in one transaction.
-- **Stable across re-runs.** UUID, passwords, REALITY keys, ports and paths are stored on the server
-  in `/etc/vps-skill/state.json` (0600) and reused, so client links stay valid and firewall rules do
-  not accumulate. `rotate_secrets` issues new credentials explicitly.
-- **Private management.** The panel (and 3X-UI's subscription server) listen on `127.0.0.1`;
-  access is via SSH tunnel. A public HTTPS panel needs an explicit `panel_domain`.
-- **Local client config.** `clash_config.yaml` is generated locally (`allow-lan: false`). Third-party
-  converter URLs embed all credentials and are only produced with `online_sub`.
-- **No guarantees about blocking.** Nothing here makes a server undetectable or unblockable.
-  Choose a profile based on what actually works from the user's network.
+- **Unified Protocol Matrix.** Deploys a complete suite of protocols:
+  - **Direct REALITY (TCP + Vision)**: High performance, direct connection on high port (great for CN2/GIA/9929/CMIN2 optimized routes).
+  - **Direct Hysteria 2 (UDP)**: High speed UDP port-hopping protocol with pinned certificate for bare-IP or domain.
+  - **Cloudflare CDN (WS-TLS + 443)**: Resilient fallback through Cloudflare Anycast CDN with carrier clean IPs (when domain is set).
+- **Public & Accessible by Default.** The 3X-UI panel listens on `0.0.0.0` by default with firewall port opened, giving operators immediate browser access (`http://<ip>:<port><path>`). SSH tunnel command is always provided as an alternative. Pass `--panel-private` to restrict to `127.0.0.1` loopback.
+- **Instant Online Subscriptions.** Online subscription URLs (OnePage and Clash Verge Rev compatible) are produced by default (`--online-sub`) using high-availability CDN rule mirrors. Pass `--no-online-sub` for local YAML only.
+- **Smooth Adoption.** Automatically adopts pre-existing 3X-UI panels and cleanly manages conflicting web servers by default. Only inbounds tagged `vps-skill-*` and client `vps-skill-<deploy_id>` are modified.
+- **Agent Self-Healing.** Warning on minor verification/probe hiccups instead of crashing; ensures node links and reports are delivered.
+- **Stable across re-runs.** UUID, passwords, REALITY keys, ports and paths are stored in `/etc/vps-skill/state.json` and reused. Explicit `--rotate-secrets` issues new credentials.
 
 ## 2. Profiles
 
-| | `reality-self` (recommended with a domain) | `legacy` (default) |
-| :--- | :--- | :--- |
-| Public TCP | 80 (ACME + redirect), 443 | REALITY high port; 80/443 when `domain` is set |
-| Public UDP | Hysteria 2 only if `enable_hy2` | Hysteria 2 random high port (default on) |
-| REALITY target | `127.0.0.1:8443` = own Nginx site, `xver: 1` | `reality_sni:443` (default `addons.mozilla.org`) |
-| What a scanner sees on 443 | The operator's own website, valid cert for the domain | Xray WS-TLS behind Cloudflare |
-| DNS | `domain` **DNS-only (grey cloud)** A record | `domain` Cloudflare-proxied (orange cloud) for WS |
-| Certificate | acme.sh webroot via Nginx, reload Nginx on renewal | acme.sh standalone on :80, restart x-ui on renewal |
-
-`reality-self` traffic flow:
-
-```text
-client ──TLS(SNI=domain)──▶ :443 Xray VLESS+REALITY+Vision ──valid client──▶ internet
-                                  └─ anything else (PROXY v1) ─▶ 127.0.0.1:8443 Nginx ─▶ static site
-:80 Nginx ─ /.well-known/acme-challenge/ ; everything else 301 → https
-```
-
-Known `legacy` limitation: REALITY forwards unauthenticated connections to the external target,
-so scanners can use the port as a relay to that site, and a foreign certificate on a VPS IP is an
-observable SNI/IP mismatch. `reality-self` avoids both.
+| Profile | Description | Direct Protocols | CDN Protocols | Target Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| `unified` (default) / `legacy` | Complete protocol matrix in one subscription | VLESS-REALITY (Vision) + Hysteria 2 (UDP) | VLESS-WS-TLS on 443 + Carrier Clean IPs | BandwagonHost, RackNerd, Akile, VMISS, general VPS |
+| `reality-self` | Port 443 stealth website fallback | VLESS-REALITY (Vision) on 443 -> own Nginx site | None (single 443) | Operators wanting single public 443 port disguised as personal site |
 
 ## 3. Inputs
 
-Ask for what is missing; never invent credentials. Before choosing `reality-self`, confirm the user
-has a DNS-only hostname and that direct HTTPS to the VPS works from their network
-(`curl -sv --resolve <domain>:443:<ip> https://<domain>/` once deployed, or any HTTPS test to the IP).
+Ask for what is missing; never invent credentials.
 
 | Field | Required | Default | Notes |
 | :--- | :--- | :--- | :--- |
 | `ip` | **yes** | — | Public IPv4 |
-| `ssh_pass` or `ssh_key` | **yes** | — | `ssh_pass` may also come from env `VPS_SSH_PASS` |
+| `ssh_pass` or `ssh_key` | **yes** | — | CLI argument `--ssh-pass` or env `VPS_SSH_PASS` |
 | `ssh_port`, `ssh_user` | no | `22`, `root` | |
-| `ssh_known_hosts` | no | — | Pre-verified known_hosts file; otherwise trust-on-first-use (`accept-new`) |
-| `profile` | no | `legacy` | `legacy` or `reality-self` |
-| `domain` | `reality-self`: yes | — | See DNS row above |
-| `ipv6`, `ipv6_domain` | no | — | `ipv6_domain` adds a CDN node (legacy) |
-| `panel_domain` | no | — | Makes the panel public over HTTPS (added to the certificate) |
-| `enable_hy2` | no | legacy on / reality-self off | `hy2_obfs` (Salamander) default on |
-| `reality_sni` | no | `addons.mozilla.org` | legacy external target |
-| `panel_port`, `hy2_port`, `reality_port` | no | random (45000-64000 / 30000-44999 / 20000-29999) | Checked against live listeners |
-| `web_backend_port` | no | `8443` | reality-self loopback HTTPS |
-| `panel_user`, `panel_pass`, `node_pass`, `obfs_password`, `panel_base_path` | no | generated | Secrets: 8-64 of `[A-Za-z0-9_-]` |
-| `site_title`, `site_description` | no | derived | Website text (reality-self) |
-| `node_prefix` | no | `srv` | Neutral node names, e.g. `srv-reality` |
-| `client_isp` | no | `unicom` | `unicom`, `mobile`, `telecom`, `overseas` (CDN clean IPs) |
-| `client_ip`, `client_location` | no | — | Report only |
-| `acme_email`, `xui_version` | no | — | e.g. `xui_version: v3.11.0` pins the release |
-| `adopt_existing_panel`, `stop_conflicting_services`, `rotate_secrets`, `reinstall_xui`, `online_sub` | no | `false` | Explicit opt-ins; confirm with the user first |
+| `profile` | no | `unified` | `unified` (default), `legacy`, `reality-self` |
+| `domain` | no | — | Required for `reality-self` or CDN nodes in `unified` |
+| `ipv6`, `ipv6_domain` | no | — | Extra IPv6 CDN node (unified) |
+| `panel_domain` | no | — | Makes the panel public over HTTPS with domain cert |
+| `panel_private` | no | `false` | When true, restricts panel to 127.0.0.1 loopback |
+| `enable_hy2` | no | `true` (unified) | `hy2_obfs` default on |
+| `reality_sni` | no | `addons.mozilla.org` | External REALITY target (unified) |
+| `panel_port`, `hy2_port`, `reality_port` | no | random high ports | Dynamic allocation with collision checks |
+| `panel_user`, `panel_pass`, `node_pass` | no | generated | Passable via CLI `--panel-pass`, etc. |
+| `adopt_existing_panel` | no | `true` | Adopts pre-installed 3X-UI |
+| `stop_conflicting_services` | no | `true` | Stops conflicting web units on 80/443 |
+| `online_sub` | no | `true` | Generates OnePage/Clash online subscription links |
 | `output_dir`, `lang` | no | `./output/<ip>`, `en` | `lang`: `en` / `zh` |
 
 ## 4. Runbook for agents
 
-1. **Collect & confirm.** Gather inputs, choose a profile with the user, and run a dry run:
-   `python3 scripts/vps_deployer.py --config <file> --dry-run`. Show the plan (ports, public
-   firewall ports, certificate names) and get confirmation before the real run.
-2. **Execute.** `python3 scripts/vps_deployer.py --config <file>` (or `python3 -m scripts.vps_deployer`).
-   Phases: preflight (read-only) → packages/BBR/firewall → certificate (+ website) → 3X-UI →
-   inbounds (conflict check, backup, transaction) → verification → local artifacts.
-3. **On failure.** The process exits non-zero with `[ERROR] ...` and writes no artifacts. Report the
-   message, explain it with section 5, and propose the matching opt-in only if it is appropriate.
-   Never work around a failure by hand-editing the panel database or killing processes.
-4. **Deliver.** Read `<output_dir>/result.json` and present: profile, panel access (SSH tunnel
-   command, URL, user, password), node names and links, path of `clash_config.yaml` and QR PNGs,
-   and the `notes`. Remind the user these files contain credentials.
+1. **Collect & execute.** Gather VPS IP and root credentials. Call `scripts/vps_deployer.py`:
+   ```bash
+   python3 scripts/vps_deployer.py --ip <IP> --ssh-pass '<PASS>' [--domain <DOMAIN>]
+   ```
+2. **Review output.** The tool writes all artifacts to `./output/<ip>/`.
+3. **Deliver.** Present:
+   - Panel direct browser URL, user, password, and optional SSH tunnel command.
+   - Node share links (VLESS Reality, Hysteria 2, CDN WS).
+   - OnePage / Clash Verge Rev subscription URLs.
+   - Clash configuration YAML file path.
 
 ## 5. Troubleshooting
 

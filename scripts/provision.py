@@ -283,8 +283,14 @@ echo XUI_CONFIGURED=1
 def x25519_script() -> str:
     return """
 set -e
-XRAY_BIN=$(find /usr/local/x-ui/bin/ -maxdepth 1 -name 'xray-linux-*' -type f -perm /111 2>/dev/null | head -n 1)
-[ -n "$XRAY_BIN" ] || { echo "Xray binary not found under /usr/local/x-ui/bin" >&2; exit 1; }
+XRAY_BIN=""
+for candidate in /usr/local/x-ui/bin/xray-linux-* /usr/local/x-ui/bin/xray /usr/bin/xray /usr/local/bin/xray; do
+    if [ -x "$candidate" ]; then
+        XRAY_BIN="$candidate"
+        break
+    fi
+done
+[ -n "$XRAY_BIN" ] || { echo "Xray binary not found" >&2; exit 1; }
 "$XRAY_BIN" x25519
 """
 

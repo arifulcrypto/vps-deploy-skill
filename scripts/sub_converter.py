@@ -8,7 +8,7 @@ only produces them with --online-sub. Prefer the locally generated clash_config.
 import urllib.parse
 from typing import List, Tuple
 
-DEFAULT_ACL4SSR_CONFIG = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_NoAuto.ini"
+DEFAULT_ACL4SSR_CONFIG = "https://fastly.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/config/ACL4SSR_Online_Full_NoAuto.ini"
 ONEPAGE_API_BASE = "https://onepage.czl.net/api/sub-convert"
 FALLBACK_API_BASE = "https://api.v1.mk/sub"
 
