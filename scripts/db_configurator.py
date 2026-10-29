@@ -25,6 +25,7 @@ def generate_remote_sqlite_script(
     reality_pubkey: str = "",
     reality_shortid: str = "8c7d6e5a",
     reality_sni: str = "addons.mozilla.org",
+    panel_domain: Optional[str] = None,
 ) -> str:
     """
     Generate a Python script that injects inbounds safely using a Base64-encoded JSON payload.
@@ -46,6 +47,7 @@ def generate_remote_sqlite_script(
         "reality_pubkey": reality_pubkey,
         "reality_shortid": reality_shortid,
         "reality_sni": reality_sni,
+        "panel_domain": panel_domain or "",
     }
 
     payload_b64 = base64.b64encode(json.dumps(payload_data).encode("utf-8")).decode("utf-8")
@@ -78,12 +80,24 @@ reality_privkey = cfg["reality_privkey"]
 reality_pubkey = cfg["reality_pubkey"]
 reality_shortid = cfg["reality_shortid"]
 reality_sni = cfg["reality_sni"]
+panel_domain = cfg.get("panel_domain") or ""
 now_ms = int(time.time() * 1000)
 
-# 1. Update settings if certificates exist
-if cert_path and key_path:
+# 1. Update settings: Panel defaults strictly to pure IP + HTTP mode unless user explicitly specified a dedicated panel domain
+if panel_domain and cert_path and key_path:
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', ?)", (panel_domain,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', ?)", (cert_path,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', ?)", (key_path,))
+else:
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webDomain', '')")
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '')")
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '')")
+
+# Strictly disable 2FA by default to prevent unexpected user lockout
+c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('twoFactorEnable', 'false')")
+c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('twoFactorToken', '')")
+
+if cert_path and key_path:
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subCertFile', ?)", (cert_path,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('subKeyFile', ?)", (key_path,))
 
@@ -96,11 +110,11 @@ existing_tables = [t[0] for t in c.execute("SELECT name FROM sqlite_master WHERE
 client_id = 1
 if 'clients' in existing_tables:
     clients_cols = [col[1] for col in c.execute('PRAGMA table_info(clients)').fetchall()]
-    row = c.execute("SELECT id FROM clients WHERE uuid = ? OR sub_id = ?", (client_uuid, sub_id)).fetchone()
+    row = c.execute("SELECT id FROM clients WHERE uuid = ? OR sub_id = ? OR email = ?", (client_uuid, sub_id, email)).fetchone()
     if row:
         client_id = row[0]
-        c.execute("UPDATE clients SET email = ?, password = ?, auth = ?, updated_at = ? WHERE id = ?",
-                  (email, password, password, now_ms, client_id))
+        c.execute("UPDATE clients SET email = ?, uuid = ?, sub_id = ?, password = ?, auth = ?, updated_at = ? WHERE id = ?",
+                  (email, client_uuid, sub_id, password, password, now_ms, client_id))
     else:
         max_client_id = c.execute("SELECT coalesce(max(id), 0) FROM clients").fetchone()[0]
         client_id = max_client_id + 1
@@ -141,13 +155,13 @@ if 'clients' in existing_tables:
 
 def upsert_inbound(tag, port, protocol, remark, settings_str, stream_str):
     inbounds_cols = [col[1] for col in c.execute('PRAGMA table_info(inbounds)').fetchall()]
-    row = c.execute("SELECT id FROM inbounds WHERE tag = ?", (tag,)).fetchone()
+    row = c.execute("SELECT id FROM inbounds WHERE tag = ? OR port = ?", (tag, port)).fetchone()
     if row:
         inb_id = row[0]
         c.execute("""
-            UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, enable = 1
+            UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, tag = ?, enable = 1
             WHERE id = ?
-        """, (port, protocol, remark, settings_str, stream_str, inb_id))
+        """, (port, protocol, remark, settings_str, stream_str, tag, inb_id))
     else:
         max_id = c.execute("SELECT coalesce(max(id), 0) FROM inbounds").fetchone()[0]
         inb_id = max_id + 1
@@ -182,6 +196,9 @@ def upsert_inbound(tag, port, protocol, remark, settings_str, stream_str):
         placeholders = ', '.join(['?'] * len(insert_cols))
         vals = [col_values[col] for col in insert_cols]
         c.execute(f"INSERT INTO inbounds ({', '.join(insert_cols)}) VALUES ({placeholders})", vals)
+
+    # Disable any other legacy inbounds colliding on the same port
+    c.execute("UPDATE inbounds SET enable = 0 WHERE port = ? AND id != ?", (port, inb_id))
 
     if 'client_inbounds' in existing_tables:
         c.execute("INSERT OR REPLACE INTO client_inbounds (client_id, inbound_id, flow_override, created_at) VALUES (?, ?, '', ?)",
@@ -375,6 +392,9 @@ reality_stream = json.dumps({
     }
 })
 upsert_inbound("vps-skill-reality", reality_port, "vless", f"VPS-Direct-Reality-{reality_port}", reality_settings, reality_stream)
+
+# Disable any legacy conflicting inbounds that might reference outdated cert paths
+c.execute("UPDATE inbounds SET enable = 0 WHERE tag NOT IN ('vps-skill-cf-vless', 'vps-skill-hy2', 'vps-skill-reality')")
 
 conn.commit()
 conn.close()

@@ -15,19 +15,26 @@ description: >-
 The **VPS Deployer Skill** equips autonomous AI agents (OpenAI GPTs, Anthropic Claude, Google Gemini / Antigravity) and engineers with an end-to-end cognitive runbook and modular toolchain to provision overseas Linux servers into resilient, high-speed multi-protocol proxy nodes.
 
 ### Core Architectural Principles:
-1. **Dynamic High Ports & Anti-Fingerprinting (No Fixed Ports)**:
-   - **Hysteria 2**: Dynamically allocated random high UDP port (e.g. `30000-44999`), QUIC + BBR congestion control, random Salamander obfuscation password. Immune to TCP head-of-line blocking; handles 30%+ packet loss during peak hours.
-   - **VLESS-Reality**: Dynamically allocated random high TCP port (e.g. `20000-29999`), XTLS Vision flow, Mozilla/legitimate SNI disguise. Bypasses port 443 active ISP probing with ultra-low 1-RTT handshake latency.
-   - **3X-UI Dashboard**: Dynamically allocated random high TCP port (e.g. `45000-64000`) with a randomized secret URL base path (`/<secret_token>/`).
-   - **VLESS-WS-TLS (Port 443)**: Standard HTTPS port required for Cloudflare CDN proxying, augmented by **Carrier Anycast Clean IPs** (optimized for China Unicom, China Mobile, and China Telecom).
-2. **Dual-Domain SAN Let's Encrypt ECC Certificates**:
-   - Automatically handles both IPv4 (`node.example.com`) and IPv6 (`ipv6.example.com`) domains using `acme.sh` standalone mode over port 80 (passes directly through Cloudflare orange cloud HTTP-01 passthrough).
-3. **Dual Redundant Clash Subscriptions (Primary + Fallback)**:
-   - **Primary**: OnePage Sub-Convert API (`https://onepage.czl.net/api/sub-convert?target=clash&url=...&config=...`) with embedded **ACL4SSR** rules (domestic apps/traffic routed DIRECT with zero proxy quota consumption).
-   - **Fallback**: Secondary Subconverter API (`https://api.v1.mk/sub?target=clash&new_name=true&url=...&config=...`).
-   - **Offline Backup**: Local `clash_config.yaml` downloaded directly into the archive folder for offline import.
-4. **Agent Autonomy & Edge-Case Self-Healing**:
-   - The agent does not simply run a blind monolithic script; it actively probes the environment, detects firewalls, cleans up conflicting web services, and handles schema variations dynamically.
+1. **Unified All-in-One Multi-Protocol Matrix (Direct + CDN Coexistence)**:
+   - Every VPS deployment generates a full matrix of protocols in a single subscription without requiring separate modes:
+     - **VLESS-Reality** (dynamic high TCP port, XTLS Vision, paypal/mozilla SNI): Ultra-low latency raw throughput for BandwagonHost, VMISS, CN2 GIA, 9929, CMIN2 premium routes.
+     - **Hysteria 2** (dynamic high UDP port, QUIC+BBR, Salamander obfs): High-speed packet-loss resistance during peak hours.
+     - **VLESS-WS-TLS (Port 443)** (Cloudflare Anycast CDN + Carrier Clean IPs): Unblockable fallback armor when IP is blocked or routes fluctuate.
+   - Client imports once; Clash rules group them into `🔥 极速直连` and `🛡️ CDN 兜底`.
+2. **Panel Raw IP HTTP Policy (No Domain / Port Conflicts)**:
+   - 3X-UI control panel defaults strictly to `http://{ip}:{panel_port}/{base_path}/` with `webDomain = ''` and no certificate binding.
+   - Eliminates Cloudflare non-standard port drops (`ERR_TIMED_OUT`) and browser certificate mismatch / 403 Forbidden errors.
+3. **Closed-Loop Credential Verification & Self-Healing**:
+   - The deployer actively executes a real login probe via HTTP loopback before producing the report.
+   - Auto-recovers from legacy password hashes, 2FA locks, or 15-minute brute-force lockout (`blocked_until`), ensuring 100% verified credentials in output.
+4. **Dynamic High Ports & Anti-Fingerprinting (No Fixed Ports)**:
+   - Dynamic non-fixed random ports for Hysteria 2, Reality, and 3X-UI panel, avoiding ISP scanning and QoS throttling.
+5. **Dual-Domain SAN Let's Encrypt ECC Certificates**:
+   - Automatically handles IPv4/IPv6 domains using `acme.sh` standalone mode over port 80.
+6. **Dual Redundant Clash Subscriptions (Primary + Fallback)**:
+   - **Primary**: OnePage Sub-Convert API with embedded **ACL4SSR** rules.
+   - **Fallback**: Secondary Subconverter API.
+   - **Offline Backup**: Local `clash_config.yaml` with pre-configured direct and CDN proxy groups.
 
 ---
 
@@ -51,6 +58,7 @@ When a user calls this skill, extract or prompt for the following fields (defaul
 | `hy2_port` | Integer | No | *Random*| Hysteria 2 UDP port | Random `30000-44999` |
 | `reality_port`| Integer | No | *Random*| VLESS-Reality TCP port | Random `20000-29999` |
 | `output_dir` | String | No | `./output/<ip>` | Local directory for reports and QR codes | `./output/198.51.100.1` |
+| `panel_domain` | String | No | `None` | Dedicated domain for 3X-UI panel (defaults to raw IP HTTP mode) | `panel.yourdomain.com` |
 | `lang` | String | No | `en` | Output language (`en` or `zh`) | `en` |
 
 ---

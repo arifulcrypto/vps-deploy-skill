@@ -8,6 +8,18 @@ import secrets
 import random
 from typing import Dict, Any
 
+# Unambiguous Base58-like character set (strictly excludes 0, O, o, 1, l, I)
+UNAMBIGUOUS_CHARSET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def generate_unambiguous_password(length: int = 14, prefix: str = "Admin_") -> str:
+    """
+    Generate high-entropy password without visually confusing characters (0/O/o, 1/l/I).
+    Guarantees seamless manual browser input without font mistranscription.
+    """
+    random_chars = "".join(secrets.choice(UNAMBIGUOUS_CHARSET) for _ in range(length))
+    return f"{prefix}{random_chars}"
+
 
 def generate_randomized_configs(
     panel_port: int = None,
