@@ -177,3 +177,17 @@ def test_online_subscriptions_default_and_opt_out(tmp_path, fake_remote_factory)
     assert len(result["online_subscriptions"]) == 2
     result_off = deploy_vps(cfg(tmp_path, online_sub=False), remote=fake_remote_factory(responses()))
     assert result_off["online_subscriptions"] == []
+
+
+def test_panel_domain_selects_cloudflare_https_port_and_blocks_direct_ip(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, panel_domain="panel.example.com"), remote=remote)
+    assert result["ports"]["panel"] in (2087, 2053, 2083, 8443)
+    assert result["panel"]["url"].startswith(f"https://panel.example.com:{result['ports']['panel']}/")
+    # Verify DB payload sent to remote contains webDomain restriction
+    db_calls = [p for n, p in remote.calls if n == "inbound configuration"]
+    assert db_calls, "Expected inbound configuration call"
+    payload = json.loads(db_calls[0])
+    assert payload["settings"]["webDomain"] == "panel.example.com"
+    # Verify notes indicate direct IP access is blocked
+    assert any("direct IP access blocked" in note for note in result["notes"])

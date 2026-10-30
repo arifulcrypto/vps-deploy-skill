@@ -35,7 +35,7 @@ class SSHTarget:
 
         env = os.environ.copy()
         if self.key_file:
-            cmd = ["ssh"] + opts + ["-o", "BatchMode=yes", "-i", self.key_file]
+            cmd = ["ssh"] + opts + ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-i", self.key_file]
         else:
             cmd = ["ssh"] + opts
         cmd += [f"{self.user}@{self.host}", remote_command]

@@ -16,6 +16,9 @@ PORT_RANGES: Dict[str, Tuple[int, int]] = {
     "reality": (20000, 29999),
 }
 
+# Cloudflare officially supported secondary HTTPS ports (ideal for admin panels under CDN proxy)
+CLOUDFLARE_HTTPS_PORTS = (2087, 2053, 2083, 8443)
+
 _rng = secrets.SystemRandom()
 
 

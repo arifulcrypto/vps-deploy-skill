@@ -306,7 +306,8 @@ try:
         result["inbounds"][spec["tag"]] = inbound_id
         if client_id is not None and "client_inbounds" in tables:
             link_cols = columns("client_inbounds")
-            link = {"client_id": client_id, "inbound_id": inbound_id, "flow_override": "", "created_at": now_ms}
+            flow_val = spec.get("client", {}).get("flow", "")
+            link = {"client_id": client_id, "inbound_id": inbound_id, "flow_override": flow_val, "created_at": now_ms}
             cols = [k for k in link if k in link_cols]
             c.execute("INSERT OR REPLACE INTO client_inbounds (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" * len(cols))),
                       [link[k] for k in cols])

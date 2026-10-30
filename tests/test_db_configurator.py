@@ -49,6 +49,11 @@ def test_rerun_is_idempotent_and_never_duplicates_settings(xui_db):
     assert rows(xui_db, "SELECT count(*) FROM settings WHERE key = 'webListen'") == [(1,)]
     assert rows(xui_db, "SELECT count(*) FROM inbounds WHERE tag LIKE 'vps-skill-%'") == [(2,)]
     assert rows(xui_db, "SELECT count(*) FROM clients WHERE email = ?", (IDENTITY["email"],)) == [(1,)]
+    # Check flow_override on client_inbounds
+    inbound_id = rows(xui_db, "SELECT id FROM inbounds WHERE tag = 'vps-skill-reality'")[0][0]
+    client_id = rows(xui_db, "SELECT id FROM clients WHERE email = ?", (IDENTITY["email"],))[0][0]
+    assert rows(xui_db, "SELECT flow_override FROM client_inbounds WHERE client_id = ? AND inbound_id = ?",
+                (client_id, inbound_id)) == [("xtls-rprx-vision",)]
     hy2 = json.loads(rows(xui_db, "SELECT settings FROM inbounds WHERE tag = 'vps-skill-hy2'")[0][0])
     assert [c["email"] for c in hy2["clients"]] == [IDENTITY["email"]]
     assert hy2["clients"][0]["auth"] == IDENTITY["node_pass"]

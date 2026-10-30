@@ -3,16 +3,31 @@
 Local Offline Clash Configuration Generator:
 Builds Clash / Mihomo YAML locally without sending node credentials to
 third-party converters. Grouping uses explicit route metadata, never node names.
+Provides commercial-grade features (unified-delay, dedicated e-commerce/TikTok, AI groups).
 """
 from typing import Any, Dict, List, Optional
 
 import yaml
 
 GROUP_NAMES = {
-    "en": {"main": "🚀 Proxy", "auto": "⚡ Auto (latency)", "fallback": "🛟 Failover",
-           "direct": "🔥 Direct nodes", "cdn": "🛡️ CDN nodes"},
-    "zh": {"main": "🚀 节点选择", "auto": "⚡ 自动选择 (低延迟)", "fallback": "🛟 故障转移",
-           "direct": "🔥 直连节点", "cdn": "🛡️ CDN 节点"},
+    "en": {
+        "main": "🚀 Proxy",
+        "auto": "⚡ Auto (latency)",
+        "fallback": "🛟 Failover",
+        "direct": "🔥 Direct nodes",
+        "cdn": "🛡️ CDN nodes",
+        "tk": "🛒 E-Commerce & TikTok",
+        "ai": "🤖 AI Services",
+    },
+    "zh": {
+        "main": "🚀 节点选择",
+        "auto": "⚡ 自动选择 (低延迟)",
+        "fallback": "🛟 故障转移",
+        "direct": "🔥 直连节点",
+        "cdn": "🛡️ CDN 节点",
+        "tk": "🛒 外贸与TikTok",
+        "ai": "🤖 AI与ChatGPT",
+    },
 }
 PROBE_URL = "https://www.gstatic.com/generate_204"
 
@@ -43,6 +58,13 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
     # Failover tries direct nodes first and falls back to CDN nodes when they are unreachable.
     groups.append({"name": g["fallback"], "type": "fallback", "url": PROBE_URL, "interval": 300,
                    "proxies": names or ["DIRECT"]})
+
+    # Dedicated E-Commerce / TikTok Group (prioritizes clean direct nodes)
+    groups.append({"name": g["tk"], "type": "select", "proxies": (direct or names) + [g["main"]]})
+
+    # Dedicated AI / ChatGPT Group
+    groups.append({"name": g["ai"], "type": "select", "proxies": [g["main"]] + names + [g["auto"]]})
+
     if direct and cdn:
         groups.append({"name": g["direct"], "type": "select", "proxies": direct})
         groups.append({"name": g["cdn"], "type": "select", "proxies": cdn})
@@ -53,6 +75,13 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
         "bind-address": "127.0.0.1",
         "mode": "rule",
         "log-level": "info",
+        "unified-delay": True,
+        "tcp-concurrent": True,
+        "experimental": {
+            "ignore-resolve-fail": True,
+        },
+        "cfw-latency-url": PROBE_URL,
+        "cfw-latency-timeout": 8000,
         "external-controller": "127.0.0.1:9090",
         "dns": {
             "enable": True,
@@ -73,6 +102,20 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
             "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
             "IP-CIDR,198.18.0.0/16,DIRECT,no-resolve",
+            f"DOMAIN-SUFFIX,tiktok.com,{g['tk']}",
+            f"DOMAIN-SUFFIX,byteoversea.com,{g['tk']}",
+            f"DOMAIN-SUFFIX,ibytedtos.com,{g['tk']}",
+            f"DOMAIN-KEYWORD,tiktok,{g['tk']}",
+            f"DOMAIN-SUFFIX,paypal.com,{g['tk']}",
+            f"DOMAIN-SUFFIX,stripe.com,{g['tk']}",
+            f"DOMAIN-SUFFIX,openai.com,{g['ai']}",
+            f"DOMAIN-SUFFIX,chatgpt.com,{g['ai']}",
+            f"DOMAIN-SUFFIX,oaistatic.com,{g['ai']}",
+            f"DOMAIN-SUFFIX,oaiusercontent.com,{g['ai']}",
+            f"DOMAIN-SUFFIX,anthropic.com,{g['ai']}",
+            f"DOMAIN-SUFFIX,claude.ai,{g['ai']}",
+            f"DOMAIN-SUFFIX,gemini.google.com,{g['ai']}",
+            "DOMAIN-SUFFIX,cn,DIRECT",
             "GEOIP,CN,DIRECT",
             f"MATCH,{g['main']}",
         ],

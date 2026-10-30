@@ -44,7 +44,7 @@ def hy2_node(prefix: str, password: str, server: str, port: int, sni: Optional[s
     name = f"{prefix}-hy2"
     params: Dict[str, str] = {}
     clash: Dict[str, Any] = {"type": "hysteria2", "server": server, "port": port, "password": password,
-                             "alpn": ["h3"], "skip-cert-verify": False}
+                             "alpn": ["h3"], "skip-cert-verify": False, "up": "300 Mbps", "down": "1000 Mbps"}
     if sni:
         params["sni"] = sni
         clash["sni"] = sni

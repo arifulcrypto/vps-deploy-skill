@@ -36,8 +36,8 @@ from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, hy2_inb
                                      reality_inbound, ws_inbound)
 from scripts.nodes import CARRIER_CLEAN_IPS, cdn_nodes, hy2_node, reality_node  # noqa: E402
 from scripts.panel_probe import REMOTE_PROBE_SCRIPT  # noqa: E402
-from scripts.port_utils import (generate_unambiguous_password, normalize_base_path,  # noqa: E402
-                                random_path, random_port)
+from scripts.port_utils import (CLOUDFLARE_HTTPS_PORTS, generate_unambiguous_password,  # noqa: E402
+                                normalize_base_path, random_path, random_port)
 from scripts.qr_engine import generate_qr  # noqa: E402
 from scripts.remote import DeploymentError, SSHTarget, last_json_line, parse_kv  # noqa: E402
 from scripts.report import render_report, secure_dir, write_secret, write_secret_json  # noqa: E402
@@ -259,6 +259,12 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
                 raise DeploymentError(f"{kind}_port {explicit}/{proto} is already used by: {', '.join(foreign)}")
             return explicit
         previous = prev.get(f"{kind}_port")
+        if kind == "panel" and c.get("panel_domain"):
+            if previous in CLOUDFLARE_HTTPS_PORTS and not provision.foreign_users(listeners, proto, previous):
+                return previous
+            for cf_port in CLOUDFLARE_HTTPS_PORTS:
+                if cf_port not in avoid and not (tcp_busy(cf_port) if proto == "tcp" else udp_busy(cf_port)):
+                    return cf_port
         if previous and previous not in avoid and not provision.foreign_users(listeners, proto, previous):
             return previous
         return random_port(kind, avoid, tcp_busy if proto == "tcp" else udp_busy)
@@ -505,11 +511,11 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     # Phase 5: inbound configuration (conflict-checked, backed up, transactional)
     print("[*] Phase 5: Applying skill-owned inbounds...")
     if c.get("panel_domain") and cert:
-        settings = {"webListen": "", "webCertFile": cert[0], "webKeyFile": cert[1]}
+        settings = {"webListen": "", "webDomain": c["panel_domain"], "webCertFile": cert[0], "webKeyFile": cert[1]}
     elif plan["panel_public"]:
-        settings = {"webListen": "", "subListen": ""}
+        settings = {"webListen": "", "subListen": "", "webDomain": ""}
     else:
-        settings = {"webListen": "127.0.0.1", "subListen": "127.0.0.1"}
+        settings = {"webListen": "127.0.0.1", "subListen": "127.0.0.1", "webDomain": ""}
     inbounds = build_inbounds(c, s, cert, hy2_cert)
     identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
     res = remote.run_python("inbound configuration", REMOTE_DB_SCRIPT, build_db_payload(identity, inbounds, settings),
@@ -580,6 +586,8 @@ def _write_artifacts(c, plan, s, cert_ok, hy2_pin, probe, notes) -> Dict[str, An
     scheme = probe.get("scheme", "http")
     if c.get("panel_domain"):
         panel_url = f"https://{c['panel_domain']}:{s['panel_port']}{s['panel_base_path']}"
+        notes.append(f"Panel access restricted to domain {c['panel_domain']} on port {s['panel_port']} "
+                     "(direct IP access blocked with 403 Forbidden).")
     elif plan["panel_public"]:
         panel_url = f"{scheme}://{c['ip']}:{s['panel_port']}{s['panel_base_path']}"
     else:
