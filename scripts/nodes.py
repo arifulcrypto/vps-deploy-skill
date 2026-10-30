@@ -34,7 +34,8 @@ def reality_node(prefix: str, uuid: str, server: str, port: int, sni: str, publi
     return _node(name, "direct", f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
         "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "tcp", "tls": True,
         "udp": True, "flow": "xtls-rprx-vision", "servername": sni,
-        "reality-opts": {"public-key": public_key, "short-id": short_id}, "client-fingerprint": "chrome",
+        "reality-opts": {"public-key": public_key, "short-id": short_id, "support-x25519mlkem768": True},
+        "client-fingerprint": "chrome",
     }, qr=True)
 
 

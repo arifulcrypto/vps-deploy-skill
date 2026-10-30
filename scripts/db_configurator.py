@@ -133,7 +133,7 @@ def reality_inbound(identity, port: int, target: str, server_names: List[str], p
                 "target": target,
                 "serverNames": server_names,
                 "privateKey": private_key,
-                "minClientVer": "",
+                "minClientVer": "1.8.0",
                 "maxClientVer": "",
                 "maxTimediff": 0,
                 "shortIds": [short_id],
