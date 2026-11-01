@@ -3,7 +3,7 @@ import pytest
 import yaml
 
 from scripts.clash_generator import generate_local_clash_yaml
-from scripts.nodes import (cdn_nodes, hy2_node, reality_node, relay_reality_node,
+from scripts.nodes import (CARRIER_CLEAN_IPS, cdn_nodes, clean_ips_for, hy2_node, reality_node, relay_reality_node,
                            residential_socks5_node, trojan_node, vmess_ws_node)
 
 
@@ -129,3 +129,14 @@ def test_metered_only_config_has_no_probing_groups(kinds):
     assert not [g for g in groups.values() if g["type"] in ("url-test", "fallback")]
     referenced = {m for g in groups.values() for m in g["proxies"]}
     assert "⚡ Auto (latency)" not in referenced and "🛟 Failover" not in referenced
+
+
+@pytest.mark.parametrize("isp", ["unicom", "mobile", "telecom", "overseas"])
+def test_alternate_https_ports_never_use_443_only_clean_ips(isp):
+    ips = clean_ips_for(isp, 2083)
+    assert len(ips) == 2 and len({ip for ip, _ in ips}) == 2
+    assert not [ip for ip, _ in ips if ip.startswith("162.159.")]
+
+
+def test_port_443_keeps_the_carrier_list():
+    assert clean_ips_for("unicom", 443) == CARRIER_CLEAN_IPS["unicom"]

@@ -72,3 +72,4 @@ description: >-
 - `extra_protocols` 按需开启 VMess、Trojan；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口路由尚未实现。
 - `cert_mode: dns-01` 通过 Cloudflare 签发证书，用于没有公网 80 端口的容器，尚未在真实 Cloudflare 上验证。
 - 面板登录探测默认只产生警告，`fail_closed` 开启后才会使部署失败。
+- Cloudflare 实测：SSL 模式请使用 Full (strict)。`162.159.x.x` 优选 IP 仅响应 443，其他 HTTPS 端口的部署会自动改用 `104.x` 和 `172.67.x` 地址。使用 `dns-01` 时 acme.sh 会把令牌保存在目标机上用于续期，请只授予单个域名的 DNS 编辑权限。
