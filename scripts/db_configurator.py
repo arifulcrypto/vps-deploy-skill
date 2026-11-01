@@ -72,6 +72,50 @@ def ws_inbound(identity, port: int, domain: str, ws_path: str, cert_path: str, k
     }
 
 
+def vmess_ws_inbound(identity, port: int, ws_path: str, domain: Optional[str] = None,
+                     cert_path: Optional[str] = None, key_path: Optional[str] = None) -> Dict[str, Any]:
+    """233boy compatible VMess + WebSocket inbound."""
+    stream: Dict[str, Any] = {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {"acceptProxyProtocol": False, "path": ws_path, "headers": {}},
+    }
+    if domain and cert_path and key_path:
+        stream["security"] = "tls"
+        stream["tlsSettings"] = _tls_settings(domain, cert_path, key_path, ["http/1.1"])
+
+    return {
+        "tag": f"{TAG_PREFIX}vmess-ws",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "vmess",
+        "remark": "vps-skill-vmess-ws",
+        "settings": {"decryption": "none"},
+        "client": _client(identity, alterId=0),
+        "stream": stream,
+    }
+
+
+def trojan_inbound(identity, port: int, domain: str, cert_path: str, key_path: str) -> Dict[str, Any]:
+    """Trojan + TCP + TLS inbound."""
+    return {
+        "tag": f"{TAG_PREFIX}trojan",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "trojan",
+        "remark": "vps-skill-trojan",
+        "settings": {},
+        "client": _client(identity, password=identity["node_pass"]),
+        "stream": {
+            "network": "tcp",
+            "security": "tls",
+            "tlsSettings": _tls_settings(domain, cert_path, key_path, ["http/1.1"]),
+            "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
+        },
+    }
+
+
+
 def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path: str,
                 obfs_password: Optional[str]) -> Dict[str, Any]:
     stream: Dict[str, Any] = {

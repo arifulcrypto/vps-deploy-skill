@@ -3,7 +3,8 @@
 Local Offline Clash Configuration Generator:
 Builds Clash / Mihomo YAML locally without sending node credentials to
 third-party converters. Grouping uses explicit route metadata, never node names.
-Provides commercial-grade features (unified-delay, dedicated e-commerce/TikTok, AI groups).
+Provides commercial-grade features (unified-delay, dedicated e-commerce/TikTok, AI groups),
+and strictly isolates metered residential / home broadband relay nodes from auto-latency testing.
 """
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,7 @@ GROUP_NAMES = {
         "fallback": "🛟 Failover",
         "direct": "🔥 Direct nodes",
         "cdn": "🛡️ CDN nodes",
+        "relay": "🏠 Residential & Relay",
         "tk": "🛒 E-Commerce & TikTok",
         "ai": "🤖 AI Services",
     },
@@ -25,6 +27,7 @@ GROUP_NAMES = {
         "fallback": "🛟 故障转移",
         "direct": "🔥 直连节点",
         "cdn": "🛡️ CDN 节点",
+        "relay": "🏠 住宅与家宽专线",
         "tk": "🛒 外贸与TikTok",
         "ai": "🤖 AI与ChatGPT",
     },
@@ -35,36 +38,81 @@ PROBE_URL = "https://www.gstatic.com/generate_204"
 def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Optional[str] = None,
                               lang: str = "en") -> str:
     """
-    nodes: items from scripts.nodes ({"clash": {...}, "route": "direct"|"cdn"}) or bare Clash
-    proxy dicts (treated as route 'direct').
+    nodes: items from scripts.nodes ({"clash": {...}, "route": "direct"|"cdn"|"relay"|"residential"})
+    or bare Clash proxy dicts (treated as route 'direct').
     """
     g = GROUP_NAMES.get(lang, GROUP_NAMES["en"])
-    proxies, direct, cdn = [], [], []
+    proxies, direct, cdn, residential_relay = [], [], [], []
     for node in nodes:
         proxy = node.get("clash", node)
         route = node.get("route", "direct")
         proxies.append(proxy)
-        (cdn if route == "cdn" else direct).append(proxy["name"])
-    names = direct + cdn
+        if route == "cdn":
+            cdn.append(proxy["name"])
+        elif route in ("residential", "relay"):
+            residential_relay.append(proxy["name"])
+        else:
+            direct.append(proxy["name"])
+
+    datacenter_nodes = direct + cdn
+    all_names = datacenter_nodes + residential_relay
 
     groups: List[Dict[str, Any]] = []
-    main = [g["auto"], g["fallback"]]
+
+    # 1. Main Selector
+    main_options = [g["auto"], g["fallback"]]
+    if residential_relay:
+        main_options.append(g["relay"])
     if direct and cdn:
-        main += [g["direct"], g["cdn"]]
-    main += names + ["DIRECT"]
-    groups.append({"name": g["main"], "type": "select", "proxies": main})
-    groups.append({"name": g["auto"], "type": "url-test", "url": PROBE_URL, "interval": 300, "tolerance": 50,
-                   "proxies": names or ["DIRECT"]})
-    # Failover tries direct nodes first and falls back to CDN nodes when they are unreachable.
-    groups.append({"name": g["fallback"], "type": "fallback", "url": PROBE_URL, "interval": 300,
-                   "proxies": names or ["DIRECT"]})
+        main_options += [g["direct"], g["cdn"]]
+    main_options += all_names + ["DIRECT"]
+    groups.append({"name": g["main"], "type": "select", "proxies": main_options})
 
-    # Dedicated E-Commerce / TikTok Group (prioritizes clean direct nodes)
-    groups.append({"name": g["tk"], "type": "select", "proxies": (direct or names) + [g["main"]]})
+    # 2. Automated latency testing: STRICTLY datacenter nodes only!
+    # Never probe residential/metered relay nodes to avoid traffic consumption & session drops.
+    auto_proxies = datacenter_nodes or all_names or ["DIRECT"]
+    groups.append({
+        "name": g["auto"],
+        "type": "url-test",
+        "url": PROBE_URL,
+        "interval": 300,
+        "tolerance": 50,
+        "proxies": auto_proxies,
+    })
 
-    # Dedicated AI / ChatGPT Group
-    groups.append({"name": g["ai"], "type": "select", "proxies": [g["main"]] + names + [g["auto"]]})
+    # 3. Failover: Datacenter direct first, then CDN
+    fallback_proxies = datacenter_nodes or all_names or ["DIRECT"]
+    groups.append({
+        "name": g["fallback"],
+        "type": "fallback",
+        "url": PROBE_URL,
+        "interval": 300,
+        "proxies": fallback_proxies,
+    })
 
+    # 4. Dedicated Residential & Relay Group (manual select, zero periodic probing)
+    if residential_relay:
+        groups.append({
+            "name": g["relay"],
+            "type": "select",
+            "proxies": residential_relay + [g["main"], "DIRECT"],
+        })
+
+    # 5. Dedicated E-Commerce / TikTok Group
+    if residential_relay:
+        tk_proxies = [g["relay"]] + residential_relay + (direct or datacenter_nodes) + [g["main"]]
+    else:
+        tk_proxies = (direct or all_names) + [g["main"]]
+    groups.append({"name": g["tk"], "type": "select", "proxies": tk_proxies})
+
+    # 6. Dedicated AI / ChatGPT Group
+    if residential_relay:
+        ai_proxies = [g["relay"]] + residential_relay + [g["main"]] + datacenter_nodes + [g["auto"]]
+    else:
+        ai_proxies = [g["main"]] + all_names + [g["auto"]]
+    groups.append({"name": g["ai"], "type": "select", "proxies": ai_proxies})
+
+    # 7. Sub-groups if both direct and cdn exist
     if direct and cdn:
         groups.append({"name": g["direct"], "type": "select", "proxies": direct})
         groups.append({"name": g["cdn"], "type": "select", "proxies": cdn})

@@ -19,7 +19,15 @@ Source of truth for every agent adapter (`claude/`, `openai/`, `gemini/`). The e
   - **Direct REALITY (TCP + Vision)**: High performance, direct connection on high port (great for CN2/GIA/9929/CMIN2 optimized routes).
   - **Direct Hysteria 2 (UDP)**: High speed UDP port-hopping protocol with pinned certificate for bare-IP or domain.
   - **Cloudflare CDN (WS-TLS + 443)**: Resilient fallback through Cloudflare Anycast CDN with carrier clean IPs (when domain is set).
-- **Public & Accessible by Default.** The 3X-UI panel listens on `0.0.0.0` by default with firewall port opened, giving operators immediate browser access (`http://<ip>:<port><path>`). SSH tunnel command is always provided as an alternative. Pass `--panel-private` to restrict to `127.0.0.1` loopback.
+  - **233boy Compatible Legacy Inbounds**: Optional VMess-WS and Trojan-TLS for maximum backward compatibility with older clients and routers.
+  - **Layer 4 Realm Relay Support**: Transparent passthrough relaying to US/home broadband NAT exits (`JP-Relay-US-Exit`).
+  - **Commercial Residential / Sticky Proxy**: Support for SOCKS5 residential proxy pools (IPRoyal, IPCook, DataImpulse) with zero leak of user credentials.
+- **Strict Clash Strategy Group Isolation.** Offline `clash_config.yaml` generation strictly isolates metered residential & home broadband relay nodes:
+  - `⚡ 自动选择 (低延迟)`: Exclusively tests datacenter VPS nodes; residential nodes are strictly excluded to prevent traffic drainage and session drops.
+  - `🏠 住宅与家宽专线`: Dedicated manual select group for residential/relay nodes with zero latency polling.
+  - `🤖 AI与ChatGPT` & `🛒 外贸与TikTok`: Automatically prioritize `🏠 住宅与家宽专线`.
+- **Public & Accessible by Default.** The 3X-UI panel listens on `0.0.43.x` / `0.0.0.0` by default with firewall port opened, giving operators immediate browser access (`http://<ip>:<port><path>`). SSH tunnel command is always provided as an alternative. Pass `--panel-private` to restrict to `127.0.0.1` loopback.
+
 - **Instant Online Subscriptions.** Online subscription URLs (OnePage and Clash Verge Rev compatible) are produced by default (`--online-sub`) using high-availability CDN rule mirrors. Pass `--no-online-sub` for local YAML only.
 - **Smooth Adoption.** Automatically adopts pre-existing 3X-UI panels and cleanly manages conflicting web servers by default. Only inbounds tagged `vps-skill-*` and client `vps-skill-<deploy_id>` are modified.
 - **Agent Self-Healing.** Warning on minor verification/probe hiccups instead of crashing; ensures node links and reports are delivered.
