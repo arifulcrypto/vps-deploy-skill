@@ -76,6 +76,8 @@ Ask for what is missing; never invent credentials.
 
 With vps-lxc-skill, use `--from-lxc <result.json> --container <name>`, or pass that tool's `deploy_<name>.json` as `--config`. Explicit options override it.
 
+Cloudflare notes, measured on a live deployment: use SSL mode Full (strict). `162.159.x.x` clean IPs answer on 443 only, so deployments on other HTTPS ports use the `104.x` and `172.67.x` addresses automatically. With `dns-01`, acme.sh keeps the token on the target for renewals, so give it DNS edit rights on one zone only.
+
 Clients: Mihomo v1.18.9 fails REALITY against the Xray in 3X-UI v3.11.0. v1.19.33 is tested in CI.
 
 ## 4. Runbook for agents

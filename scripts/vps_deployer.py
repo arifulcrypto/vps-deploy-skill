@@ -37,7 +37,7 @@ from scripts.clash_generator import generate_local_clash_yaml  # noqa: E402
 from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, hy2_inbound,  # noqa: E402
                                      reality_inbound, trojan_inbound, vmess_ws_inbound, ws_inbound,
                                      ws_local_inbound)
-from scripts.nodes import (CARRIER_CLEAN_IPS, cdn_nodes, hy2_node, reality_node,  # noqa: E402
+from scripts.nodes import (CARRIER_CLEAN_IPS, cdn_nodes, clean_ips_for, hy2_node, reality_node,  # noqa: E402
                            relay_reality_node, residential_socks5_node, trojan_node, vmess_ws_node)
 from scripts.panel_probe import REMOTE_PROBE_SCRIPT  # noqa: E402
 from scripts.port_utils import (CLOUDFLARE_HTTPS_PORTS, generate_unambiguous_password,  # noqa: E402
@@ -494,10 +494,10 @@ def build_nodes(c: Dict[str, Any], s: Dict[str, Any], cert_ok: bool, hy2_pin: Op
             nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], sni=c["domain"], **hy2_args))
     if c["profile"] in ("unified", "legacy") and c["domain"] and cert_ok:
         nodes += cdn_nodes(prefix, s["client_uuid"], c["domain"], s["ws_path"],
-                           CARRIER_CLEAN_IPS[c["client_isp"]], c["ipv6_domain"], port=c["https_port"])
+                           clean_ips_for(c["client_isp"], c["https_port"]), c["ipv6_domain"], port=c["https_port"])
     if c["cdn_domain"] and cert_ok:
         nodes += cdn_nodes(prefix, s["client_uuid"], c["cdn_domain"], s["ws_path"],
-                           CARRIER_CLEAN_IPS[c["client_isp"]], port=c["https_port"])
+                           clean_ips_for(c["client_isp"], c["https_port"]), port=c["https_port"])
     if "vmess" in c["extra_protocols"]:
         tls = bool(c["domain"] and cert_ok)
         nodes.append(vmess_ws_node(f"{prefix}-vmess", s["client_uuid"], c["domain"] if tls else c["ip"],

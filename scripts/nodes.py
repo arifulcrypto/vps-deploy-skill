@@ -23,6 +23,19 @@ CARRIER_CLEAN_IPS = {
     "overseas": [("104.16.160.1", "a"), ("104.17.160.1", "b")],
 }
 
+# Measured through real Cloudflare: these ranges answer on 443 but time out on 2053, 2083 and 8443.
+HTTPS_443_ONLY_PREFIXES = ("162.159.",)
+
+
+def clean_ips_for(isp: str, port: int) -> List[Tuple[str, str]]:
+    """Clean IPs for a carrier that can serve this port, topped up from the general list when needed."""
+    ips = list(CARRIER_CLEAN_IPS[isp])
+    if port == 443:
+        return ips
+    usable = [ip for ip, _ in ips if not ip.startswith(HTTPS_443_ONLY_PREFIXES)]
+    spares = [ip for ip, _ in CARRIER_CLEAN_IPS["overseas"] if ip not in usable]
+    return list(zip((usable + spares)[:len(ips)], "abcdef"))
+
 
 def _host(server: str) -> str:
     return f"[{server}]" if ":" in server else server
