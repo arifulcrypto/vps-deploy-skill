@@ -270,8 +270,9 @@ def test_builtin_subscription_is_opened_and_reported(tmp_path, fake_remote_facto
     assert 2096 in result["ports"]["public_tcp"]
     assert result["subscription"]["url"].startswith("http://198.51.100.1:2096/s/")
     assert "/c/" in result["subscription"]["clash_url"]
-    assert any("does not carry the Hysteria 2 certificate pin" in n for n in result["notes"])
     payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    hy2 = [i for i in payload["inbounds"] if i["protocol"] == "hysteria"][0]
+    assert hy2["stream"]["tlsSettings"]["settings"]["pinnedPeerCertSha256"] == ["aabbcc"]
     assert payload["settings"]["subPort"] == "2096" and payload["settings"]["subClashEnable"] == "true"
 
 
@@ -300,12 +301,15 @@ def test_cdn_domain_shares_the_https_port(tmp_path, fake_remote_factory):
     result = deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com",
                             cdn_domain="cdn.example.com", online_sub=False), remote=remote)
     routes = [n["route"] for n in result["nodes"]]
-    assert routes.count("cdn") == 3
+    assert routes.count("cdn") == 6
     payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
     ws = [i for i in payload["inbounds"] if i["stream"]["network"] == "ws"][0]
     assert ws["listen"] == "127.0.0.1" and ws["stream"]["security"] == "none"
     assert ws["port"] not in result["ports"]["public_tcp"]
+    xhttp = [i for i in payload["inbounds"] if i["stream"]["network"] == "xhttp"][0]
+    assert xhttp["listen"] == "127.0.0.1" and xhttp["port"] not in result["ports"]["public_tcp"]
     website = [p for n, p in remote.calls if n == "website deployment"][0]
+    assert f"location ^~ {xhttp['stream']['xhttpSettings']['path']}/" in website
     assert f"location = {ws['stream']['wsSettings']['path']}" in website
     assert f"proxy_pass http://127.0.0.1:{ws['port']};" in website
 
@@ -329,3 +333,36 @@ def test_probe_failure_note_does_not_claim_nodes_work(tmp_path, fake_remote_fact
     remote = fake_remote_factory(responses(**{"panel login verification": (1, probe, "")}))
     result = deploy_vps(cfg(tmp_path, online_sub=False), remote=remote)
     assert not any("fully operational" in n for n in result["notes"])
+
+
+def test_unified_can_use_xhttp_as_its_cdn_transport(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, domain="www.example.com", cdn_transport="xhttp", online_sub=False), remote=remote)
+    assert [n["name"] for n in result["nodes"] if n["route"] == "cdn"] == ["srv-xhttp", "srv-xhttp-a", "srv-xhttp-b"]
+    assert "type=xhttp" in result["nodes"][-1]["uri"] and "mode=packet-up" in result["nodes"][-1]["uri"]
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    assert [i["stream"]["security"] for i in payload["inbounds"] if i["stream"]["network"] == "xhttp"] == ["tls"]
+
+
+def test_exit_proxy_adds_a_metered_node_and_routing(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, exit_proxy={"server": "203.0.113.5", "port": 12321, "username": "u",
+                                                  "password": "p"}, exit_port=10053, online_sub=False), remote=remote)
+    node = [n for n in result["nodes"] if n["name"] == "srv-exit"][0]
+    assert node["route"] == "residential" and ":10053?" in node["uri"]
+    assert 10053 in result["ports"]["public_tcp"]
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    assert payload["outbound"]["tag"] == "vps-skill-exit"
+    assert payload["outbound"]["settings"]["servers"][0]["users"] == [{"user": "u", "pass": "p"}]
+    assert "vps-skill-exit" in {i["tag"] for i in payload["inbounds"]}
+
+
+def test_manage_dns_runs_before_certificates(tmp_path, fake_remote_factory, monkeypatch):
+    from scripts import cloudflare_dns
+    seen = []
+    monkeypatch.setattr(cloudflare_dns, "ensure_records", lambda token, records: seen.extend(records) or ["created x"])
+    monkeypatch.setattr(cloudflare_dns, "wait_for_dns", lambda name, content: True)
+    remote = fake_remote_factory(responses())
+    deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com", cdn_domain="cdn.example.com",
+                   manage_dns=True, cf_token="a" * 40, online_sub=False), remote=remote)
+    assert seen == [("A", "www.example.com", "198.51.100.1", False), ("A", "cdn.example.com", "198.51.100.1", True)]

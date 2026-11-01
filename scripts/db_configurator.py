@@ -11,12 +11,14 @@ from typing import Any, Dict, List, Optional
 
 TAG_PREFIX = "vps-skill-"
 DEFAULT_DB_PATH = "/etc/x-ui/x-ui.db"
+DEFAULT_XRAY_CONFIG = "/usr/local/x-ui/bin/config.json"
 
 SNIFFING = {"enabled": True, "destOverride": ["http", "tls", "quic", "fakedns"], "routeOnly": False}
 
 
-def _tls_settings(server_name: str, cert_path: str, key_path: str, alpn: List[str]) -> Dict[str, Any]:
-    return {
+def _tls_settings(server_name: str, cert_path: str, key_path: str, alpn: List[str],
+                  pin_sha256: Optional[str] = None) -> Dict[str, Any]:
+    tls = {
         "serverName": server_name,
         "minVersion": "1.2",
         "maxVersion": "1.3",
@@ -34,6 +36,10 @@ def _tls_settings(server_name: str, cert_path: str, key_path: str, alpn: List[st
         }],
         "alpn": alpn,
     }
+    if pin_sha256:
+        # Client hint: 3X-UI copies it into subscription links, so self-signed nodes stay verifiable.
+        tls["settings"] = {"pinnedPeerCertSha256": [pin_sha256.replace(":", "").lower()]}
+    return tls
 
 
 def _client(identity: Dict[str, str], **extra) -> Dict[str, Any]:
@@ -91,6 +97,53 @@ def ws_local_inbound(identity, port: int, ws_path: str) -> Dict[str, Any]:
     }
 
 
+def xhttp_local_inbound(identity, port: int, path: str) -> Dict[str, Any]:
+    """VLESS-XHTTP behind the website, on loopback."""
+    return {
+        "tag": f"{TAG_PREFIX}cdn-xhttp",
+        "port": port,
+        "listen": "127.0.0.1",
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-cdn-xhttp",
+        "settings": {"decryption": "none"},
+        "client": _client(identity, flow=""),
+        "stream": {
+            "network": "xhttp",
+            "security": "none",
+            "xhttpSettings": {"path": path, "host": "", "mode": "auto"},
+        },
+    }
+
+
+def xhttp_tls_inbound(identity, port: int, domain: str, path: str, cert_path: str, key_path: str) -> Dict[str, Any]:
+    """VLESS-XHTTP terminating TLS itself, for hosts without the website in front."""
+    return {
+        "tag": f"{TAG_PREFIX}cdn-xhttp",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-cdn-xhttp",
+        "settings": {"decryption": "none"},
+        "client": _client(identity, flow=""),
+        "stream": {
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": _tls_settings(domain, cert_path, key_path, ["h2", "http/1.1"]),
+            "xhttpSettings": {"path": path, "host": "", "mode": "auto"},
+        },
+    }
+
+
+def exit_outbound(proxy: Dict[str, Any]) -> Dict[str, Any]:
+    """Xray outbound and routing for the residential exit inbound."""
+    server: Dict[str, Any] = {"address": proxy["server"], "port": int(proxy["port"])}
+    if proxy.get("username"):
+        server["users"] = [{"user": proxy["username"], "pass": proxy["password"]}]
+    settings: Dict[str, Any] = {"servers": [server]}
+    return {"tag": f"{TAG_PREFIX}exit", "protocol": proxy.get("protocol", "socks"), "settings": settings}
+
+
 def vmess_ws_inbound(identity, port: int, ws_path: str, domain: Optional[str] = None,
                      cert_path: Optional[str] = None, key_path: Optional[str] = None) -> Dict[str, Any]:
     """233boy compatible VMess + WebSocket inbound."""
@@ -136,7 +189,8 @@ def trojan_inbound(identity, port: int, domain: str, cert_path: str, key_path: s
 
 
 def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path: str,
-                obfs_password: Optional[str]) -> Dict[str, Any]:
+                obfs_password: Optional[str], pin_sha256: Optional[str] = None,
+                masquerade_url: Optional[str] = None) -> Dict[str, Any]:
     stream: Dict[str, Any] = {
         "network": "hysteria",
         "hysteriaSettings": {
@@ -146,7 +200,7 @@ def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path:
                            "content": "", "headers": {}, "statusCode": 0},
         },
         "security": "tls",
-        "tlsSettings": _tls_settings(server_name, cert_path, key_path, ["h3"]),
+        "tlsSettings": _tls_settings(server_name, cert_path, key_path, ["h3"], pin_sha256),
         "finalmask": {
             "quicParams": {
                 "congestion": "bbr",
@@ -162,6 +216,9 @@ def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path:
             },
         },
     }
+    if masquerade_url:
+        stream["hysteriaSettings"]["masquerade"].update({"type": "proxy", "url": masquerade_url, "rewriteHost": True,
+                                                         "insecure": True})
     if obfs_password:
         stream["finalmask"]["udp"] = [{"type": "salamander", "settings": {"password": obfs_password}}]
     return {
@@ -177,9 +234,9 @@ def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path:
 
 
 def reality_inbound(identity, port: int, target: str, server_names: List[str], private_key: str,
-                    public_key: str, short_id: str, xver: int = 0) -> Dict[str, Any]:
+                    public_key: str, short_id: str, xver: int = 0, tag: str = "reality") -> Dict[str, Any]:
     return {
-        "tag": f"{TAG_PREFIX}reality",
+        "tag": f"{TAG_PREFIX}{tag}",
         "port": port,
         "transport": "tcp",
         "protocol": "vless",
@@ -207,8 +264,11 @@ def reality_inbound(identity, port: int, target: str, server_names: List[str], p
 
 
 def build_db_payload(identity: Dict[str, str], inbounds: List[Dict[str, Any]], settings: Dict[str, str],
-                     db_path: str = DEFAULT_DB_PATH, backup: bool = True) -> Dict[str, Any]:
+                     db_path: str = DEFAULT_DB_PATH, backup: bool = True,
+                     outbound: Optional[Dict[str, Any]] = None, xray_config: str = DEFAULT_XRAY_CONFIG) -> Dict[str, Any]:
     return {
+        "outbound": outbound,
+        "xray_config": xray_config,
         "db_path": db_path,
         "tag_prefix": TAG_PREFIX,
         "identity": {k: identity[k] for k in ("email", "uuid", "sub_id", "node_pass")},
@@ -312,6 +372,30 @@ def insert_row(table, values):
     return c.lastrowid
 
 
+def update_template(outbound):
+    """Add or remove the skill's outbound and rule. The rest of the panel's template stays as it is."""
+    tag = prefix + "exit"
+    row = c.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig'").fetchone()
+    if row and row[0].strip():
+        template = json.loads(row[0])
+    elif outbound:
+        # Never saved by the panel: the running config is the default template plus inbounds.
+        with open(cfg["xray_config"]) as f:
+            template = json.load(f)
+        template["inbounds"] = [i for i in template.get("inbounds", []) if i.get("tag") == "api"]
+    else:
+        return
+    outbounds = [o for o in template.get("outbounds", []) if o.get("tag") != tag]
+    routing = template.setdefault("routing", {})
+    rules = [r for r in routing.get("rules", []) if r.get("outboundTag") != tag]
+    if outbound:
+        outbounds.append(outbound)
+        rules.append({"type": "field", "inboundTag": [tag], "outboundTag": tag})
+    template["outbounds"] = outbounds
+    routing["rules"] = rules
+    set_setting("xrayTemplateConfig", json.dumps(template, indent=2))
+
+
 def merged_settings(spec, existing_str):
     try:
         existing = json.loads(existing_str or "{}")
@@ -329,6 +413,7 @@ try:
     c.execute("BEGIN")
     for key, value in cfg["settings"].items():
         set_setting(key, value)
+    update_template(cfg.get("outbound"))
 
     client_id = None
     if "clients" in tables:

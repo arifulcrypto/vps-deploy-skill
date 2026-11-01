@@ -32,13 +32,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts import provision, web_profile  # noqa: E402
+from scripts import cloudflare_dns, provision, web_profile  # noqa: E402
 from scripts.clash_generator import generate_local_clash_yaml  # noqa: E402
-from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, hy2_inbound,  # noqa: E402
+from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, exit_outbound, hy2_inbound,  # noqa: E402
                                      reality_inbound, trojan_inbound, vmess_ws_inbound, ws_inbound,
-                                     ws_local_inbound)
+                                     ws_local_inbound, xhttp_local_inbound, xhttp_tls_inbound)
 from scripts.nodes import (CARRIER_CLEAN_IPS, cdn_nodes, clean_ips_for, hy2_node, reality_node,  # noqa: E402
-                           relay_reality_node, residential_socks5_node, trojan_node, vmess_ws_node)
+                           relay_reality_node, residential_socks5_node, trojan_node, vmess_ws_node,
+                           xhttp_nodes)
 from scripts.panel_probe import REMOTE_PROBE_SCRIPT  # noqa: E402
 from scripts.port_utils import (CLOUDFLARE_HTTPS_PORTS, generate_unambiguous_password,  # noqa: E402
                                 normalize_base_path, random_path, random_port)
@@ -61,6 +62,8 @@ DEFAULT_SUB_PORT = 2096
 CERT_ROOT = "/root/cert"
 CERT_MODES = ("http-01", "dns-01")
 EXTRA_PROTOCOLS = ("vmess", "trojan")
+CDN_TRANSPORTS = ("ws", "xhttp", "both")
+EXIT_PROTOCOLS = ("socks", "http")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 
 __all__ = ["DeploymentError", "validate_config", "normalize_config", "build_plan", "deploy_vps", "main"]
@@ -130,6 +133,28 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     if cfg.get("cf_token") and not TOKEN_RE.match(str(cfg["cf_token"])):
         raise DeploymentError("Invalid cf_token.")
 
+    transport = _str(cfg, "cdn_transport")
+    if transport and transport not in CDN_TRANSPORTS:
+        raise DeploymentError(f"Invalid cdn_transport '{transport}'. Choose one of: {', '.join(CDN_TRANSPORTS)}")
+    if transport == "both" and profile != "reality-self":
+        raise DeploymentError("cdn_transport 'both' needs profile 'reality-self': Nginx shares one port between them.")
+    if cfg.get("manage_dns") and not cfg.get("cf_token"):
+        raise DeploymentError("manage_dns needs a Cloudflare API token: set 'cf_token' or CF_TOKEN.")
+    exit_proxy = cfg.get("exit_proxy")
+    if exit_proxy:
+        if not isinstance(exit_proxy, dict) or not exit_proxy.get("server") or not exit_proxy.get("port"):
+            raise DeploymentError("Invalid exit_proxy: 'server' and 'port' are required.")
+        _port(exit_proxy["port"], "exit_proxy port")
+        if exit_proxy.get("protocol", "socks") not in EXIT_PROTOCOLS:
+            raise DeploymentError(f"Invalid exit_proxy protocol. Choose one of: {', '.join(EXIT_PROTOCOLS)}")
+        if bool(exit_proxy.get("username")) != bool(exit_proxy.get("password")):
+            raise DeploymentError("exit_proxy needs both username and password, or neither.")
+    if _flag(cfg, "hy2_masquerade", False):
+        if profile != "reality-self":
+            raise DeploymentError("hy2_masquerade needs profile 'reality-self', which provides the website.")
+        if _flag(cfg, "hy2_obfs", True):
+            raise DeploymentError("hy2_masquerade needs hy2_obfs off: Salamander hides the HTTP/3 endpoint.")
+
     extras = _extras(cfg)
     unknown = sorted(set(extras) - set(EXTRA_PROTOCOLS))
     if unknown:
@@ -150,7 +175,7 @@ def validate_config(cfg: Dict[str, Any]) -> None:
         raise DeploymentError("Invalid lang. Choose 'en' or 'zh'.")
 
     tcp_ports = {}
-    for key in ("panel_port", "reality_port", "web_backend_port", "sub_port", "vmess_port", "trojan_port"):
+    for key in ("panel_port", "reality_port", "web_backend_port", "sub_port", "vmess_port", "trojan_port", "exit_port"):
         if cfg.get(key) not in (None, ""):
             tcp_ports[key] = _port(cfg[key], key)
     if cfg.get("hy2_port") not in (None, ""):
@@ -231,6 +256,11 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "profile": profile,
         "domain": domain,
         "cdn_domain": _str(cfg, "cdn_domain").lower() or None,
+        "cdn_transport": _str(cfg, "cdn_transport") or ("both" if profile == "reality-self" else "ws"),
+        "manage_dns": _flag(cfg, "manage_dns", False),
+        "exit_proxy": cfg.get("exit_proxy") or None,
+        "exit_port": int(cfg["exit_port"]) if cfg.get("exit_port") else None,
+        "hy2_masquerade": _flag(cfg, "hy2_masquerade", False),
         "https_port": int(cfg.get("https_port") or 443),
         "cert_mode": _str(cfg, "cert_mode") or "http-01",
         "cf_token": cfg.get("cf_token") or None,
@@ -314,6 +344,7 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
     s["panel_base_path"] = c["panel_base_path"] or prev.get("panel_base_path") or random_path()
     s["ws_path"] = prev.get("ws_path") or random_path(9).rstrip("/")
     s["vmess_path"] = prev.get("vmess_path") or random_path(9).rstrip("/")
+    s["xhttp_path"] = prev.get("xhttp_path") or random_path(9).rstrip("/")
     if not rotate:
         s["reality_private_key"] = prev.get("reality_private_key", "")
         s["reality_public_key"] = prev.get("reality_public_key", "")
@@ -358,13 +389,17 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
         s["reality_port"] = choose("reality", "tcp", taken)
     taken |= {s["reality_port"]}
     s["hy2_port"] = choose("hy2", "udp", set()) if c["enable_hy2"] else None
-    for kind in c["extra_protocols"]:
+    for kind in c["extra_protocols"] + (["exit"] if c["exit_proxy"] else []):
         s[f"{kind}_port"] = choose(kind, "tcp", taken)
         taken |= {s[f"{kind}_port"]}
     s["sub_port"] = c["sub_port"] if c["enable_sub"] else None
     if c["cdn_domain"]:
-        s["ws_backend_port"] = prev.get("ws_backend_port") or random_port("ws_backend", taken, tcp_busy)
-        taken |= {s["ws_backend_port"]}
+        if c["cdn_transport"] in ("ws", "both"):
+            s["ws_backend_port"] = prev.get("ws_backend_port") or random_port("ws_backend", taken, tcp_busy)
+            taken |= {s["ws_backend_port"]}
+        if c["cdn_transport"] in ("xhttp", "both"):
+            s["xhttp_backend_port"] = prev.get("xhttp_backend_port") or random_port("xhttp_backend", taken, tcp_busy)
+            taken |= {s["xhttp_backend_port"]}
 
     panel_public = not c["panel_private"]
     http_validation = c["cert_mode"] == "http-01"
@@ -382,6 +417,8 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
         if c.get("panel_domain") and http_validation:
             tcp_public.append(80)
     tcp_public += [s[f"{kind}_port"] for kind in c["extra_protocols"]]
+    if c["exit_proxy"]:
+        tcp_public.append(s["exit_port"])
     s["public_tcp"] = sorted(set(tcp_public))
     s["public_udp"] = [s["hy2_port"]] if s["hy2_port"] else []
 
@@ -399,7 +436,8 @@ def check_final_plan(c: Dict[str, Any], s: Dict[str, Any], listeners: List[Dict[
     """Check the resolved plan: defaults and stored ports included, before anything is changed."""
     tcp = {"SSH": c["ssh_port"], "panel": s["panel_port"], "REALITY": s["reality_port"],
            "subscription": s.get("sub_port"), "VMess": s.get("vmess_port"), "Trojan": s.get("trojan_port"),
-           "WebSocket backend": s.get("ws_backend_port")}
+           "WebSocket backend": s.get("ws_backend_port"), "XHTTP backend": s.get("xhttp_backend_port"),
+           "exit": s.get("exit_port")}
     if c["profile"] == "reality-self":
         tcp["website backend"] = c["web_backend_port"]
     elif c["domain"]:
@@ -414,7 +452,7 @@ def check_final_plan(c: Dict[str, Any], s: Dict[str, Any], listeners: List[Dict[
             raise DeploymentError(f"Port {port}/tcp is planned for both {seen[port]} and {label}.")
         seen[port] = label
     for label, port in (("subscription", s.get("sub_port")), ("VMess", s.get("vmess_port")),
-                        ("Trojan", s.get("trojan_port"))):
+                        ("Trojan", s.get("trojan_port")), ("exit", s.get("exit_port"))):
         foreign = provision.foreign_users(listeners, "tcp", port) if port else []
         if foreign:
             raise DeploymentError(f"{label} port {port}/tcp is already used by: {', '.join(foreign)}")
@@ -448,24 +486,29 @@ def web_conflicts(c: Dict[str, Any], listeners: List[Dict[str, Any]]) -> Tuple[L
 
 
 def build_inbounds(c: Dict[str, Any], s: Dict[str, Any], cert: Optional[Tuple[str, str]],
-                   hy2_cert: Optional[Tuple[str, str]]) -> List[Dict[str, Any]]:
+                   hy2_cert: Optional[Tuple[str, str]], hy2_pin: Optional[str] = None) -> List[Dict[str, Any]]:
     identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
     inbounds = []
     if c["profile"] == "reality-self":
         inbounds.append(reality_inbound(identity, s["reality_port"], f"127.0.0.1:{c['web_backend_port']}", [c["domain"]],
                                         s["reality_private_key"], s["reality_public_key"],
                                         s["reality_short_id"], xver=1))
-        if c["cdn_domain"]:
+        if s.get("ws_backend_port"):
             inbounds.append(ws_local_inbound(identity, s["ws_backend_port"], s["ws_path"]))
+        if s.get("xhttp_backend_port"):
+            inbounds.append(xhttp_local_inbound(identity, s["xhttp_backend_port"], s["xhttp_path"]))
     else:
-        if c["domain"] and cert:
+        if c["domain"] and cert and c["cdn_transport"] == "xhttp":
+            inbounds.append(xhttp_tls_inbound(identity, c["https_port"], c["domain"], s["xhttp_path"], cert[0], cert[1]))
+        elif c["domain"] and cert:
             inbounds.append(ws_inbound(identity, c["https_port"], c["domain"], s["ws_path"], cert[0], cert[1]))
         inbounds.append(reality_inbound(identity, s["reality_port"], f"{c['reality_sni']}:443", [c["reality_sni"]],
                                         s["reality_private_key"], s["reality_public_key"], s["reality_short_id"]))
     if s["hy2_port"] and hy2_cert:
         server_name = c["domain"] if cert and hy2_cert == cert else c["ip"]
+        masquerade = f"https://127.0.0.1:{c['web_backend_port']}" if c["hy2_masquerade"] else None
         inbounds.append(hy2_inbound(identity, s["hy2_port"], server_name, hy2_cert[0], hy2_cert[1],
-                                    s["obfs_password"] if c["hy2_obfs"] else None))
+                                    s["obfs_password"] if c["hy2_obfs"] else None, hy2_pin, masquerade))
     if "vmess" in c["extra_protocols"]:
         tls = (c["domain"], cert[0], cert[1]) if c["domain"] and cert else (None, None, None)
         inbounds.append(vmess_ws_inbound(identity, s["vmess_port"], s["vmess_path"], *tls))
@@ -473,6 +516,13 @@ def build_inbounds(c: Dict[str, Any], s: Dict[str, Any], cert: Optional[Tuple[st
         if not cert:
             raise DeploymentError("Trojan needs a certificate, but none was issued.")
         inbounds.append(trojan_inbound(identity, s["trojan_port"], c["domain"], cert[0], cert[1]))
+    if c["exit_proxy"]:
+        if c["profile"] == "reality-self":
+            target, names, xver = f"127.0.0.1:{c['web_backend_port']}", [c["domain"]], 1
+        else:
+            target, names, xver = f"{c['reality_sni']}:443", [c["reality_sni"]], 0
+        inbounds.append(reality_inbound(identity, s["exit_port"], target, names, s["reality_private_key"],
+                                        s["reality_public_key"], s["reality_short_id"], xver=xver, tag="exit"))
     return inbounds
 
 
@@ -492,18 +542,24 @@ def build_nodes(c: Dict[str, Any], s: Dict[str, Any], cert_ok: bool, hy2_pin: Op
             nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], pin_sha256=hy2_pin, **hy2_args))
         else:
             nodes.append(hy2_node(prefix, s["node_pass"], c["ip"], s["hy2_port"], sni=c["domain"], **hy2_args))
-    if c["profile"] in ("unified", "legacy") and c["domain"] and cert_ok:
-        nodes += cdn_nodes(prefix, s["client_uuid"], c["domain"], s["ws_path"],
-                           clean_ips_for(c["client_isp"], c["https_port"]), c["ipv6_domain"], port=c["https_port"])
-    if c["cdn_domain"] and cert_ok:
-        nodes += cdn_nodes(prefix, s["client_uuid"], c["cdn_domain"], s["ws_path"],
-                           clean_ips_for(c["client_isp"], c["https_port"]), port=c["https_port"])
+    clean_ips = clean_ips_for(c["client_isp"], c["https_port"])
+    cdn_host = c["cdn_domain"] or (c["domain"] if c["profile"] in ("unified", "legacy") else None)
+    if cdn_host and cert_ok:
+        if c["cdn_transport"] in ("ws", "both"):
+            nodes += cdn_nodes(prefix, s["client_uuid"], cdn_host, s["ws_path"], clean_ips,
+                               None if c["cdn_domain"] else c["ipv6_domain"], port=c["https_port"])
+        if c["cdn_transport"] in ("xhttp", "both"):
+            nodes += xhttp_nodes(prefix, s["client_uuid"], cdn_host, s["xhttp_path"], clean_ips, port=c["https_port"])
     if "vmess" in c["extra_protocols"]:
         tls = bool(c["domain"] and cert_ok)
         nodes.append(vmess_ws_node(f"{prefix}-vmess", s["client_uuid"], c["domain"] if tls else c["ip"],
                                    s["vmess_port"], s["vmess_path"], host=c["domain"] if tls else None, tls=tls))
     if "trojan" in c["extra_protocols"]:
         nodes.append(trojan_node(f"{prefix}-trojan", s["node_pass"], c["domain"], s["trojan_port"], sni=c["domain"]))
+    if c["exit_proxy"]:
+        server, sni = (c["domain"], c["domain"]) if c["profile"] == "reality-self" else (c["ip"], c["reality_sni"])
+        nodes.append(reality_node(prefix, s["client_uuid"], server, s["exit_port"], sni, s["reality_public_key"],
+                                  s["reality_short_id"], name=f"{prefix}-exit", route="residential"))
     for relay in c["relays"]:
         nodes.append(relay_reality_node(relay["name"], relay["server"], int(relay["port"]), nodes[0]))
     for proxy in c["residential"]:
@@ -598,6 +654,15 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     _print_plan(c, plan)
     _save_state(remote, s)
 
+    if c["manage_dns"]:
+        print("[*] Cloudflare DNS records...")
+        records = cloudflare_dns.planned_records(c)
+        for change in cloudflare_dns.ensure_records(c["cf_token"], records):
+            print(f"[+] DNS: {change}")
+        for _, name, content, proxied in records:
+            if not proxied and not cloudflare_dns.wait_for_dns(name, content):
+                notes.append(f"{name} was not visible on a public resolver yet.")
+
     # Phase 2: base system, optional service stop, firewall
     print("[*] Phase 2: Packages, BBR and firewall...")
     if units:
@@ -642,8 +707,10 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     if c["profile"] == "reality-self":
         remote.run_script("website deployment", web_profile.nginx_apply_script(
             web_profile.render_nginx_conf(plan["cert_domains"], c["web_backend_port"], nginx_version, *cert,
-                                          ws_path=s["ws_path"] if c["cdn_domain"] else None,
-                                          ws_port=s.get("ws_backend_port")),
+                                          ws_path=s["ws_path"] if s.get("ws_backend_port") else None,
+                                          ws_port=s.get("ws_backend_port"),
+                                          xhttp_path=s["xhttp_path"] if s.get("xhttp_backend_port") else None,
+                                          xhttp_port=s.get("xhttp_backend_port")),
             web_profile.render_site(c["site_title"], c["site_description"])))
 
     hy2_cert, hy2_pin = None, None
@@ -681,10 +748,11 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
         settings = {"webListen": "127.0.0.1", "subListen": "127.0.0.1", "webDomain": ""}
     if s["sub_port"]:
         settings.update({"subEnable": "true", "subClashEnable": "true", "subPort": str(s["sub_port"])})
-    inbounds = build_inbounds(c, s, cert, hy2_cert)
+    inbounds = build_inbounds(c, s, cert, hy2_cert, hy2_pin)
     identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
-    res = remote.run_python("inbound configuration", REMOTE_DB_SCRIPT, build_db_payload(identity, inbounds, settings),
-                            check=False)
+    outbound = exit_outbound(c["exit_proxy"]) if c["exit_proxy"] else None
+    res = remote.run_python("inbound configuration", REMOTE_DB_SCRIPT,
+                            build_db_payload(identity, inbounds, settings, outbound=outbound), check=False)
     db = last_json_line(res.stdout) or {}
     if not db.get("ok"):
         detail = db.get("error") or (res.stderr.strip()[-400:] or "no output")
@@ -767,12 +835,9 @@ def _write_artifacts(c, plan, s, cert_ok, hy2_pin, probe, notes, sub_paths=None)
     shareable = [n["uri"] for n in nodes if n["route"] != "residential"]
     online_subs = list(build_subscription_urls(shareable)) if c["online_sub"] else []
     subscription = subscription_urls(c, plan, s, sub_paths or {})
-    if subscription and hy2_pin:
-        notes.append("The panel subscription does not carry the Hysteria 2 certificate pin. "
-                     "Use the link or clash_config.yaml for Hysteria 2 on this deployment.")
     if c["residential"]:
-        notes.append("Residential entries are client-side nodes. Traffic reaches them directly from the "
-                     "client; server-side residential exit routing is not configured.")
+        notes.append("Residential entries are client-side nodes. Use 'exit_proxy' to exit through a "
+                     "residential proxy from the server instead.")
     if c["profile"] in ("unified", "legacy"):
         notes.append(f"REALITY forwards unauthenticated connections to {c['reality_sni']}:443. Consider "
                      "profile 'reality-self' (own domain + website on 443).")
@@ -853,6 +918,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--profile", choices=PROFILES, help="Deployment profile (default unified; legacy is an alias)")
     parser.add_argument("--domain", help="Domain (legacy: Cloudflare-proxied for WS; reality-self: DNS-only)")
     parser.add_argument("--cdn-domain", help="reality-self: Cloudflare-proxied hostname sharing the HTTPS port")
+    parser.add_argument("--cdn-transport", choices=CDN_TRANSPORTS,
+                        help="CDN transport (default: both for reality-self, ws otherwise)")
+    parser.add_argument("--manage-dns", action="store_true", default=None,
+                        help="Create or update the Cloudflare records. Needs a token with Zone: DNS: Edit")
+    parser.add_argument("--exit-port", type=int, help="Port of the inbound that exits through exit_proxy")
+    parser.add_argument("--hy2-masquerade", action="store_true", default=None,
+                        help="reality-self: answer non-Hysteria HTTP/3 with the website. Needs --no-hy2-obfs")
+    parser.add_argument("--hy2-obfs", action=argparse.BooleanOptionalAction, default=None,
+                        help="Use Salamander obfuscation for Hysteria 2 (default: on)")
     parser.add_argument("--cert-mode", choices=CERT_MODES, help="Certificate validation (default http-01)")
     parser.add_argument("--cf-token", help="Cloudflare API token for dns-01 (prefer the CF_TOKEN env var)")
     parser.add_argument("--https-port", type=int, help="Public HTTPS port (default 443)")

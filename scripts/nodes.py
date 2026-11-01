@@ -46,11 +46,11 @@ def _node(name: str, route: str, uri: str, clash: Dict[str, Any], qr: bool) -> D
 
 
 def reality_node(prefix: str, uuid: str, server: str, port: int, sni: str, public_key: str,
-                 short_id: str) -> Dict[str, Any]:
-    name = f"{prefix}-reality"
+                 short_id: str, name: Optional[str] = None, route: str = "direct") -> Dict[str, Any]:
+    name = name or f"{prefix}-reality"
     params = urlencode({"encryption": "none", "flow": "xtls-rprx-vision", "security": "reality", "sni": sni,
                         "fp": "chrome", "pbk": public_key, "sid": short_id, "type": "tcp"})
-    return _node(name, "direct", f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
+    return _node(name, route, f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
         "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "tcp", "tls": True,
         "udp": True, "flow": "xtls-rprx-vision", "servername": sni,
         "reality-opts": {"public-key": public_key, "short-id": short_id, "support-x25519mlkem768": True},
@@ -98,6 +98,26 @@ def ws_node(name: str, uuid: str, server: str, host: str, ws_path: str, qr: bool
         "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "ws", "tls": True,
         "udp": True, "servername": host, "ws-opts": {"path": ws_path, "headers": {"Host": host}},
     }, qr=qr)
+
+
+def xhttp_node(name: str, uuid: str, server: str, host: str, path: str, port: int = 443,
+               qr: bool = False) -> Dict[str, Any]:
+    """VLESS over XHTTP. packet-up needs nothing from the CDN beyond ordinary HTTP requests."""
+    params = urlencode({"encryption": "none", "type": "xhttp", "security": "tls", "path": path, "host": host,
+                        "sni": host, "mode": "packet-up", "fp": "chrome"})
+    return _node(name, "cdn", f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
+        "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "xhttp", "tls": True,
+        "udp": True, "servername": host, "client-fingerprint": "chrome",
+        "xhttp-opts": {"path": path, "host": host, "mode": "packet-up"},
+    }, qr=qr)
+
+
+def xhttp_nodes(prefix: str, uuid: str, domain: str, path: str, clean_ips: Sequence[Tuple[str, str]],
+                port: int = 443) -> List[Dict[str, Any]]:
+    nodes = [xhttp_node(f"{prefix}-xhttp", uuid, domain, domain, path, port, qr=True)]
+    for clean_ip, label in clean_ips:
+        nodes.append(xhttp_node(f"{prefix}-xhttp-{label}", uuid, clean_ip, domain, path, port))
+    return nodes
 
 
 def cdn_nodes(prefix: str, uuid: str, domain: str, ws_path: str,

@@ -30,7 +30,8 @@ def parse_version(text: Optional[str]) -> Tuple[int, ...]:
 
 def render_nginx_conf(domains: Sequence[str], backend_port: int, nginx_version: str,
                       cert_path: Optional[str] = None, key_path: Optional[str] = None,
-                      ws_path: Optional[str] = None, ws_port: Optional[int] = None) -> str:
+                      ws_path: Optional[str] = None, ws_port: Optional[int] = None,
+                      xhttp_path: Optional[str] = None, xhttp_port: Optional[int] = None) -> str:
     """
     Without cert paths only the port-80 server is rendered (bootstrap for HTTP-01).
     """
@@ -72,6 +73,19 @@ server {{
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_read_timeout 300s;
+    }}
+"""
+    if xhttp_path and xhttp_port:
+        ws_block += f"""
+    location ^~ {xhttp_path}/ {{
+        proxy_pass http://127.0.0.1:{int(xhttp_port)};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        client_max_body_size 0;
         proxy_read_timeout 300s;
     }}
 """
