@@ -72,6 +72,25 @@ def ws_inbound(identity, port: int, domain: str, ws_path: str, cert_path: str, k
     }
 
 
+def ws_local_inbound(identity, port: int, ws_path: str) -> Dict[str, Any]:
+    """VLESS-WS behind the website: Nginx terminates TLS and forwards the secret path to loopback."""
+    return {
+        "tag": f"{TAG_PREFIX}cf-vless",
+        "port": port,
+        "listen": "127.0.0.1",
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-cdn-ws",
+        "settings": {"decryption": "none"},
+        "client": _client(identity, flow=""),
+        "stream": {
+            "network": "ws",
+            "security": "none",
+            "wsSettings": {"acceptProxyProtocol": False, "path": ws_path, "headers": {}},
+        },
+    }
+
+
 def vmess_ws_inbound(identity, port: int, ws_path: str, domain: Optional[str] = None,
                      cert_path: Optional[str] = None, key_path: Optional[str] = None) -> Dict[str, Any]:
     """233boy compatible VMess + WebSocket inbound."""
@@ -334,15 +353,15 @@ try:
         row = c.execute("SELECT id, settings FROM inbounds WHERE tag = ?", (spec["tag"],)).fetchone()
         if row:
             inbound_id = row[0]
-            c.execute("UPDATE inbounds SET port = ?, protocol = ?, remark = ?, settings = ?, stream_settings = ?, "
-                      "enable = 1 WHERE id = ?",
-                      (spec["port"], spec["protocol"], spec["remark"], merged_settings(spec, row[1]), stream,
-                       inbound_id))
+            c.execute("UPDATE inbounds SET port = ?, listen = ?, protocol = ?, remark = ?, settings = ?, "
+                      "stream_settings = ?, enable = 1 WHERE id = ?",
+                      (spec["port"], spec.get("listen", ""), spec["protocol"], spec["remark"],
+                       merged_settings(spec, row[1]), stream, inbound_id))
         else:
             inbound_id = insert_row("inbounds", {
                 "user_id": 1, "up": 0, "down": 0, "total": 0, "remark": spec["remark"], "sub_sort_index": 1,
                 "exclude_from_sub": 0, "enable": 1, "expiry_time": 0, "traffic_reset": "never",
-                "traffic_reset_day": 1, "last_traffic_reset_time": 0, "listen": "", "port": spec["port"],
+                "traffic_reset_day": 1, "last_traffic_reset_time": 0, "listen": spec.get("listen", ""), "port": spec["port"],
                 "protocol": spec["protocol"], "settings": merged_settings(spec, None), "stream_settings": stream,
                 "tag": spec["tag"], "sniffing": json.dumps(cfg["sniffing"]), "node_id": None,
                 "share_addr_strategy": "node", "share_addr": "", "disable_flow": 0, "origin_node_guid": "",
@@ -356,6 +375,15 @@ try:
             c.execute("INSERT OR REPLACE INTO client_inbounds (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" * len(cols))),
                       [link[k] for k in cols])
 
+    # The panel counts client traffic only into an existing row, keyed by email.
+    if "client_traffics" in tables and result["inbounds"]:
+        if not c.execute("SELECT 1 FROM client_traffics WHERE email = ?", (ident["email"],)).fetchone():
+            insert_row("client_traffics", {"inbound_id": next(iter(result["inbounds"].values())), "enable": 1,
+                                           "email": ident["email"], "up": 0, "down": 0, "expiry_time": 0,
+                                           "total": 0, "reset": 0, "reset_day": 0, "reset_weekday": 0,
+                                           "reset_max": 0, "reset_count": 0, "last_online": 0,
+                                           "last_sub_fetch": 0})
+
     # Disable only skill-owned inbounds that are no longer part of the plan (e.g. after a profile switch).
     planned = {spec["tag"] for spec in cfg["inbounds"]}
     for rid, tag in c.execute("SELECT id, tag FROM inbounds WHERE enable = 1").fetchall():
@@ -363,6 +391,8 @@ try:
             c.execute("UPDATE inbounds SET enable = 0 WHERE id = ?", (rid,))
             result["disabled_stale"].append(tag)
     c.execute("COMMIT")
+    result["sub_paths"] = {k: v for k, v in c.execute(
+        "SELECT key, value FROM settings WHERE key IN ('subPath', 'subClashPath')").fetchall()}
 except Exception as exc:
     c.execute("ROLLBACK")
     finish({"ok": False, "error": "database update failed and was rolled back: %r" % (exc,)}, 4)

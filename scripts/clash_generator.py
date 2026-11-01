@@ -59,8 +59,8 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
 
     groups: List[Dict[str, Any]] = []
 
-    # 1. Main Selector
-    main_options = [g["auto"], g["fallback"]]
+    # 1. Main Selector. Group references must stay acyclic: Mihomo rejects the whole file otherwise.
+    main_options = [g["auto"], g["fallback"]] if datacenter_nodes else []
     if residential_relay:
         main_options.append(g["relay"])
     if direct and cdn:
@@ -68,34 +68,31 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
     main_options += all_names + ["DIRECT"]
     groups.append({"name": g["main"], "type": "select", "proxies": main_options})
 
-    # 2. Automated latency testing: STRICTLY datacenter nodes only!
-    # Never probe residential/metered relay nodes to avoid traffic consumption & session drops.
-    auto_proxies = datacenter_nodes or all_names or ["DIRECT"]
-    groups.append({
-        "name": g["auto"],
-        "type": "url-test",
-        "url": PROBE_URL,
-        "interval": 300,
-        "tolerance": 50,
-        "proxies": auto_proxies,
-    })
-
-    # 3. Failover: Datacenter direct first, then CDN
-    fallback_proxies = datacenter_nodes or all_names or ["DIRECT"]
-    groups.append({
-        "name": g["fallback"],
-        "type": "fallback",
-        "url": PROBE_URL,
-        "interval": 300,
-        "proxies": fallback_proxies,
-    })
+    # 2/3. Periodic probes use datacenter nodes only, so these groups are omitted when none exist.
+    # Probing residential/relay nodes would burn metered traffic and drop sticky sessions.
+    if datacenter_nodes:
+        groups.append({
+            "name": g["auto"],
+            "type": "url-test",
+            "url": PROBE_URL,
+            "interval": 300,
+            "tolerance": 50,
+            "proxies": datacenter_nodes,
+        })
+        groups.append({
+            "name": g["fallback"],
+            "type": "fallback",
+            "url": PROBE_URL,
+            "interval": 300,
+            "proxies": datacenter_nodes,
+        })
 
     # 4. Dedicated Residential & Relay Group (manual select, zero periodic probing)
     if residential_relay:
         groups.append({
             "name": g["relay"],
             "type": "select",
-            "proxies": residential_relay + [g["main"], "DIRECT"],
+            "proxies": residential_relay + ["DIRECT"],
         })
 
     # 5. Dedicated E-Commerce / TikTok Group
@@ -107,9 +104,11 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
 
     # 6. Dedicated AI / ChatGPT Group
     if residential_relay:
-        ai_proxies = [g["relay"]] + residential_relay + [g["main"]] + datacenter_nodes + [g["auto"]]
+        ai_proxies = [g["relay"]] + residential_relay + [g["main"]] + datacenter_nodes
     else:
-        ai_proxies = [g["main"]] + all_names + [g["auto"]]
+        ai_proxies = [g["main"]] + all_names
+    if datacenter_nodes:
+        ai_proxies.append(g["auto"])
     groups.append({"name": g["ai"], "type": "select", "proxies": ai_proxies})
 
     # 7. Sub-groups if both direct and cdn exist

@@ -19,14 +19,14 @@ Source of truth for every agent adapter (`claude/`, `openai/`, `gemini/`). The e
   - **Direct REALITY (TCP + Vision)**: High performance, direct connection on high port (great for CN2/GIA/9929/CMIN2 optimized routes).
   - **Direct Hysteria 2 (UDP)**: High speed UDP port-hopping protocol with pinned certificate for bare-IP or domain.
   - **Cloudflare CDN (WS-TLS + 443)**: Resilient fallback through Cloudflare Anycast CDN with carrier clean IPs (when domain is set).
-  - **233boy Compatible Legacy Inbounds**: Optional VMess-WS and Trojan-TLS for maximum backward compatibility with older clients and routers.
+  - **Opt-in compatibility inbounds**: `extra_protocols: ["vmess", "trojan"]` adds VMess-WS and Trojan-TLS for older clients. Xray marks WebSocket, VMess and Trojan as deprecated, so they stay off by default.
   - **Layer 4 Realm Relay Support**: Transparent passthrough relaying to US/home broadband NAT exits (`JP-Relay-US-Exit`).
   - **Commercial Residential / Sticky Proxy**: Support for SOCKS5 residential proxy pools (IPRoyal, IPCook, DataImpulse) with zero leak of user credentials.
 - **Strict Clash Strategy Group Isolation.** Offline `clash_config.yaml` generation strictly isolates metered residential & home broadband relay nodes:
   - `⚡ 自动选择 (低延迟)`: Exclusively tests datacenter VPS nodes; residential nodes are strictly excluded to prevent traffic drainage and session drops.
   - `🏠 住宅与家宽专线`: Dedicated manual select group for residential/relay nodes with zero latency polling.
   - `🤖 AI与ChatGPT` & `🛒 外贸与TikTok`: Automatically prioritize `🏠 住宅与家宽专线`.
-- **Public & Accessible by Default.** The 3X-UI panel listens on `0.0.43.x` / `0.0.0.0` by default with firewall port opened, giving operators immediate browser access (`http://<ip>:<port><path>`). SSH tunnel command is always provided as an alternative. Pass `--panel-private` to restrict to `127.0.0.1` loopback.
+- **Public & Accessible by Default.** The 3X-UI panel listens on `0.0.0.0` by default with firewall port opened, giving operators immediate browser access (`http://<ip>:<port><path>`). SSH tunnel command is always provided as an alternative. Pass `--panel-private` to restrict to `127.0.0.1` loopback.
 
 - **Instant Online Subscriptions.** Online subscription URLs (OnePage and Clash Verge Rev compatible) are produced by default (`--online-sub`) using high-availability CDN rule mirrors. Pass `--no-online-sub` for local YAML only.
 - **Smooth Adoption.** Automatically adopts pre-existing 3X-UI panels and cleanly manages conflicting web servers by default. Only inbounds tagged `vps-skill-*` and client `vps-skill-<deploy_id>` are modified.
@@ -56,12 +56,27 @@ Ask for what is missing; never invent credentials.
 | `panel_private` | no | `false` | When true, restricts panel to 127.0.0.1 loopback |
 | `enable_hy2` | no | `true` (unified) | `hy2_obfs` default on |
 | `reality_sni` | no | `addons.mozilla.org` | External REALITY target (unified) |
-| `panel_port`, `hy2_port`, `reality_port` | no | random high ports | Dynamic allocation with collision checks |
+| `panel_port`, `hy2_port` | no | random high ports | Dynamic allocation with collision checks on the final plan |
+| `reality_port` | no | `443` when no domain needs it and it is free, otherwise a random high port | Existing deployments keep their port |
+| `https_port` | no | `443` | Public HTTPS port. LXC secondary containers use their mapped port |
+| `cdn_domain` | no | — | `reality-self` only: Cloudflare-proxied hostname on the same port as REALITY and the website |
+| `cert_mode`, `cf_token` | no | `http-01` | `dns-01` issues through Cloudflare for hosts without public port 80. Token via `CF_TOKEN` |
+| `extra_protocols`, `vmess_port`, `trojan_port` | no | none | `vmess`, `trojan`. Trojan needs `domain` |
+| `relays` | no | `[]` | `[{"name","server","port"}]`: REALITY node through an L4 relay. Set up the relay itself separately |
+| `residential` | no | `[]` | `[{"name","server","port","username","password"}]`: client-side SOCKS5 node. No server-side exit routing is configured |
+| `enable_sub`, `sub_port` | no | `true`, `2096` | 3X-UI built-in subscription, published when the panel is public |
+| `hy2_up`, `hy2_down` | no | unset (BBR) | Client Mbps. Setting both selects Brutal, so use real link speeds |
+| `web_backend_port` | no | `8443` | `reality-self` loopback website port |
 | `panel_user`, `panel_pass`, `node_pass` | no | generated | Passable via CLI `--panel-pass`, etc. |
 | `adopt_existing_panel` | no | `true` | Adopts pre-installed 3X-UI |
 | `stop_conflicting_services` | no | `true` | Stops conflicting web units on 80/443 |
 | `online_sub` | no | `true` | Generates OnePage/Clash online subscription links |
 | `output_dir`, `lang` | no | `./output/<ip>`, `en` | `lang`: `en` / `zh` |
+| `fail_closed` | no | `false` | Treat a failed panel login probe as a failed deployment |
+
+With vps-lxc-skill, use `--from-lxc <result.json> --container <name>`, or pass that tool's `deploy_<name>.json` as `--config`. Explicit options override it.
+
+Clients: Mihomo v1.18.9 fails REALITY against the Xray in 3X-UI v3.11.0. v1.19.33 is tested in CI.
 
 ## 4. Runbook for agents
 

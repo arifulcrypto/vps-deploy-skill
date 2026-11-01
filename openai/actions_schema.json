@@ -90,21 +90,22 @@
           "profile": {
             "type": "string",
             "enum": [
+              "unified",
               "legacy",
               "reality-self"
             ],
-            "default": "legacy"
+            "default": "unified"
           },
           "domain": {
             "type": "string",
-            "description": "legacy: Cloudflare-proxied WS domain; reality-self: DNS-only domain (required)"
+            "description": "unified: Cloudflare-proxied WS domain; reality-self: DNS-only domain (required)"
           },
           "ipv6": {
             "type": "string"
           },
           "ipv6_domain": {
             "type": "string",
-            "description": "legacy only: extra CDN node"
+            "description": "unified only: extra CDN node"
           },
           "panel_domain": {
             "type": "string",
@@ -115,7 +116,7 @@
           },
           "reality_sni": {
             "type": "string",
-            "description": "legacy REALITY target",
+            "description": "unified REALITY target",
             "default": "addons.mozilla.org"
           },
           "client_isp": {
@@ -168,6 +169,149 @@
               "zh"
             ],
             "default": "en"
+          },
+          "panel_port": {
+            "type": "integer"
+          },
+          "reality_port": {
+            "type": "integer",
+            "description": "Default: 443 when no domain needs it and it is free"
+          },
+          "hy2_port": {
+            "type": "integer"
+          },
+          "https_port": {
+            "type": "integer",
+            "default": 443
+          },
+          "web_backend_port": {
+            "type": "integer",
+            "default": 8443
+          },
+          "sub_port": {
+            "type": "integer",
+            "default": 2096
+          },
+          "vmess_port": {
+            "type": "integer"
+          },
+          "trojan_port": {
+            "type": "integer"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "acme_email": {
+            "type": "string"
+          },
+          "ssh_known_hosts": {
+            "type": "string",
+            "description": "known_hosts file with the verified server key"
+          },
+          "panel_private": {
+            "type": "boolean",
+            "default": false
+          },
+          "reinstall_xui": {
+            "type": "boolean",
+            "default": false
+          },
+          "fail_closed": {
+            "type": "boolean",
+            "default": false,
+            "description": "Fail the deployment when the panel login probe fails"
+          },
+          "enable_sub": {
+            "type": "boolean",
+            "default": true,
+            "description": "Publish the 3X-UI built-in subscription"
+          },
+          "cdn_domain": {
+            "type": "string",
+            "description": "reality-self only: Cloudflare-proxied hostname on the shared HTTPS port"
+          },
+          "cert_mode": {
+            "type": "string",
+            "enum": [
+              "http-01",
+              "dns-01"
+            ],
+            "default": "http-01"
+          },
+          "cf_token": {
+            "type": "string",
+            "description": "Cloudflare API token for dns-01"
+          },
+          "extra_protocols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "vmess",
+                "trojan"
+              ]
+            }
+          },
+          "relays": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "server",
+                "port"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "server": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "residential": {
+            "type": "array",
+            "description": "Client-side SOCKS5 nodes; no server-side exit routing",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "server",
+                "port",
+                "username",
+                "password"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "server": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer"
+                },
+                "username": {
+                  "type": "string"
+                },
+                "password": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "hy2_up": {
+            "type": "integer",
+            "description": "Client Mbps; set with hy2_down to use Brutal"
+          },
+          "hy2_down": {
+            "type": "integer",
+            "description": "Client Mbps; set with hy2_up to use Brutal"
           }
         }
       },

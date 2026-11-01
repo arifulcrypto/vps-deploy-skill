@@ -1,4 +1,5 @@
 """Local Clash configuration generator and node builder."""
+import pytest
 import yaml
 
 from scripts.clash_generator import generate_local_clash_yaml
@@ -88,3 +89,43 @@ def test_vmess_and_trojan_nodes():
     assert tj["clash"]["type"] == "trojan"
     assert tj["clash"]["sni"] == "vps.com"
 
+
+
+def group_map(yaml_text):
+    return {g["name"]: g for g in yaml.safe_load(yaml_text)["proxy-groups"]}
+
+
+def assert_acyclic(groups):
+    def visit(name, path):
+        assert name not in path, f"cycle: {path + [name]}"
+        for member in groups.get(name, {}).get("proxies", []):
+            if member in groups:
+                visit(member, path + [name])
+    for name in groups:
+        visit(name, [])
+
+
+def mixed_nodes():
+    direct = reality_node("n", "uuid", "198.51.100.1", 443, "www.example.com", "pub", "ab12")
+    return {
+        "direct": [direct],
+        "relay": [relay_reality_node("relay-a", "198.51.100.2", 10031, direct)],
+        "residential": [residential_socks5_node("res-a", "203.0.113.5", 12321, "u", "p")],
+    }
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+@pytest.mark.parametrize("kinds", [["direct"], ["direct", "relay", "residential"], ["relay"], ["residential"],
+                                   ["relay", "residential"]])
+def test_groups_are_acyclic_for_every_node_mix(kinds, lang):
+    nodes = sum((mixed_nodes()[k] for k in kinds), [])
+    assert_acyclic(group_map(generate_local_clash_yaml(nodes, lang=lang)))
+
+
+@pytest.mark.parametrize("kinds", [["relay"], ["residential"], ["relay", "residential"]])
+def test_metered_only_config_has_no_probing_groups(kinds):
+    nodes = sum((mixed_nodes()[k] for k in kinds), [])
+    groups = group_map(generate_local_clash_yaml(nodes))
+    assert not [g for g in groups.values() if g["type"] in ("url-test", "fallback")]
+    referenced = {m for g in groups.values() for m in g["proxies"]}
+    assert "⚡ Auto (latency)" not in referenced and "🛟 Failover" not in referenced

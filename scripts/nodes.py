@@ -46,12 +46,20 @@ def reality_node(prefix: str, uuid: str, server: str, port: int, sni: str, publi
 
 
 def hy2_node(prefix: str, password: str, server: str, port: int, sni: Optional[str] = None,
-             pin_sha256: Optional[str] = None, obfs_password: Optional[str] = None) -> Dict[str, Any]:
-    """`pin_sha256` (colon-separated hex) pins a self-signed certificate for bare-IP deployments."""
+             pin_sha256: Optional[str] = None, obfs_password: Optional[str] = None,
+             up_mbps: Optional[int] = None, down_mbps: Optional[int] = None) -> Dict[str, Any]:
+    """
+    `pin_sha256` (colon-separated hex) pins a self-signed certificate for bare-IP deployments.
+    `up_mbps`/`down_mbps` are only set when known: a client-declared rate selects Brutal, which
+    sends at that rate regardless of loss, so a wrong guess hurts more than leaving BBR in charge.
+    """
     name = f"{prefix}-hy2"
     params: Dict[str, str] = {}
     clash: Dict[str, Any] = {"type": "hysteria2", "server": server, "port": port, "password": password,
-                             "alpn": ["h3"], "skip-cert-verify": False, "up": "300 Mbps", "down": "1000 Mbps"}
+                             "alpn": ["h3"], "skip-cert-verify": False}
+    if up_mbps and down_mbps:
+        clash["up"] = f"{up_mbps} Mbps"
+        clash["down"] = f"{down_mbps} Mbps"
     if sni:
         params["sni"] = sni
         clash["sni"] = sni
@@ -69,22 +77,24 @@ def hy2_node(prefix: str, password: str, server: str, port: int, sni: Optional[s
     return _node(name, "direct", uri, clash, qr=True)
 
 
-def ws_node(name: str, uuid: str, server: str, host: str, ws_path: str, qr: bool = False) -> Dict[str, Any]:
+def ws_node(name: str, uuid: str, server: str, host: str, ws_path: str, qr: bool = False,
+            port: int = 443) -> Dict[str, Any]:
     params = urlencode({"encryption": "none", "type": "ws", "security": "tls", "path": ws_path, "host": host,
                         "sni": host})
-    return _node(name, "cdn", f"vless://{uuid}@{_host(server)}:443?{params}#{quote(name)}", {
-        "type": "vless", "server": server, "port": 443, "uuid": uuid, "network": "ws", "tls": True,
+    return _node(name, "cdn", f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
+        "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "ws", "tls": True,
         "udp": True, "servername": host, "ws-opts": {"path": ws_path, "headers": {"Host": host}},
     }, qr=qr)
 
 
 def cdn_nodes(prefix: str, uuid: str, domain: str, ws_path: str,
-              clean_ips: Sequence[Tuple[str, str]], ipv6_domain: Optional[str] = None) -> List[Dict[str, Any]]:
-    nodes = [ws_node(f"{prefix}-cdn", uuid, domain, domain, ws_path, qr=True)]
+              clean_ips: Sequence[Tuple[str, str]], ipv6_domain: Optional[str] = None,
+              port: int = 443) -> List[Dict[str, Any]]:
+    nodes = [ws_node(f"{prefix}-cdn", uuid, domain, domain, ws_path, qr=True, port=port)]
     for clean_ip, label in clean_ips:
-        nodes.append(ws_node(f"{prefix}-cdn-{label}", uuid, clean_ip, domain, ws_path))
+        nodes.append(ws_node(f"{prefix}-cdn-{label}", uuid, clean_ip, domain, ws_path, port=port))
     if ipv6_domain:
-        nodes.append(ws_node(f"{prefix}-cdn-v6", uuid, ipv6_domain, ipv6_domain, ws_path))
+        nodes.append(ws_node(f"{prefix}-cdn-v6", uuid, ipv6_domain, ipv6_domain, ws_path, port=port))
     return nodes
 
 
@@ -130,8 +140,10 @@ def vmess_ws_node(name: str, uuid: str, server: str, port: int, ws_path: str,
 def trojan_node(name: str, password: str, server: str, port: int, sni: Optional[str] = None,
                 network: str = "tcp", qr: bool = False) -> Dict[str, Any]:
     """Trojan-GFW compatible standard HTTPS disguised node."""
-    params = {"sni": sni} if sni else {}
-    query = f"?{urlencode(params)}" if params else ""
+    params = {"security": "tls", "type": network}
+    if sni:
+        params["sni"] = sni
+    query = f"?{urlencode(params)}"
     uri = f"trojan://{quote(password, safe='')}@{_host(server)}:{port}{query}#{quote(name)}"
     clash: Dict[str, Any] = {
         "type": "trojan",

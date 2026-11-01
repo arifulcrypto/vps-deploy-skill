@@ -1,4 +1,5 @@
 """Provisioning script builders: shell syntax, quoting and output parsers."""
+import os
 import subprocess
 
 import pytest
@@ -86,3 +87,31 @@ def test_nginx_conf_adapts_to_version():
 def test_site_content_is_escaped():
     site = web_profile.render_site("<script>x</script>", "a & b")
     assert "<script>x" not in site["index.html"] and "&lt;script&gt;" in site["index.html"]
+
+
+def run_firewall(tmp_path, tool_body, script):
+    """Run the generated script with a fake firewall tool first on PATH."""
+    tool = tmp_path / "ufw"
+    tool.write_text("#!/bin/bash\n" + tool_body)
+    tool.chmod(0o755)
+    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+
+def test_firewall_rule_failure_is_a_failure(tmp_path):
+    res = run_firewall(tmp_path, 'case "$1" in status) echo "Status: active";; *) exit 1;; esac\n',
+                       provision.firewall_script([443], [42972]))
+    assert res.returncode == 40 and "FIREWALL=ufw" not in res.stdout
+    assert "ufw allow 443/tcp" in res.stderr
+
+
+def test_firewall_rule_missing_after_apply_is_a_failure(tmp_path):
+    res = run_firewall(tmp_path, 'case "$1" in status) echo "Status: active";; *) exit 0;; esac\n',
+                       provision.firewall_script([443], []))
+    assert res.returncode == 40 and "is not active" in res.stderr
+
+
+def test_firewall_success_reports_backend(tmp_path):
+    res = run_firewall(tmp_path, 'case "$1" in status) printf "Status: active\\n\\n443/tcp ALLOW Anywhere\\n";; *) exit 0;; esac\n',
+                       provision.firewall_script([443], []))
+    assert res.returncode == 0 and "FIREWALL=ufw" in res.stdout

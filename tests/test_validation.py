@@ -82,7 +82,16 @@ def test_rejects_shell_sensitive_hostnames(key, value):
 
 @pytest.mark.parametrize("extra,match", [
     ({"panel_port": 70000}, "Invalid panel_port"),
-    ({"reality_port": 443}, "collides with the HTTPS port"),
+    ({"reality_port": 443, "domain": "www.example.com"}, "collides with the HTTPS port"),
+    ({"cdn_domain": "cdn.example.com"}, "needs profile 'reality-self'"),
+    ({"profile": "reality-self", "domain": "www.example.com", "cdn_domain": "www.example.com"}, "must differ"),
+    ({"cert_mode": "tls-alpn"}, "Invalid cert_mode"),
+    ({"cert_mode": "dns-01", "domain": "www.example.com"}, "Cloudflare API token"),
+    ({"extra_protocols": "wireguard"}, "Unknown extra_protocols"),
+    ({"extra_protocols": "trojan"}, "needs 'domain'"),
+    ({"relays": [{"name": "r"}]}, "missing server, port"),
+    ({"residential": [{"name": "a b", "server": "s", "port": 1, "username": "u", "password": "p"}]}, "Invalid residential name"),
+    ({"hy2_up": 100}, "both hy2_up and hy2_down"),
     ({"panel_port": 25000, "reality_port": 25000}, "collides with panel_port"),
     ({"panel_pass": "short"}, "Invalid panel_pass"),
     ({"panel_pass": "has space in it"}, "Invalid panel_pass"),

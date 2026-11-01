@@ -8,13 +8,15 @@ import yaml
 
 from scripts.vps_deployer import DeploymentError, deploy_vps
 
-PREFLIGHT = "OS=Debian GNU/Linux 12\nARCH=x86_64\nXUI={xui}\nSTATE={state}\nPY=1\nNGINX=\n---LISTENERS---\n{ss}"
+PREFLIGHT = ("OS=Debian GNU/Linux 12\nARCH=x86_64\nXUI={xui}\nSTATE={state}\nPENDING={pending}\nPY=1\nNGINX=\n"
+             "---LISTENERS---\n{ss}")
 
 
-def responses(xui=0, state=None, ss="", **overrides):
+def responses(xui=0, state=None, ss="", pending=None, **overrides):
     base = {
-        "preflight": (0, PREFLIGHT.format(xui=xui, state=1 if state else 0, ss=ss), ""),
+        "preflight": (0, PREFLIGHT.format(xui=xui, state=1 if state else 0, pending=1 if pending else 0, ss=ss), ""),
         "load deployment state": (0, json.dumps(state) if state else "", ""),
+        "load pending state": (0, json.dumps(pending) if pending else "", ""),
         "system preparation": (0, "BBR=bbr\n", ""),
         "firewall": (0, "FIREWALL=ufw\n", ""),
         "certificate issuance": (0, "CERT_STATUS=issued\n", ""),
@@ -191,3 +193,139 @@ def test_panel_domain_selects_cloudflare_https_port_and_blocks_direct_ip(tmp_pat
     assert payload["settings"]["webDomain"] == "panel.example.com"
     # Verify notes indicate direct IP access is blocked
     assert any("direct IP access blocked" in note for note in result["notes"])
+
+
+def test_ip_only_default_uses_https_port_for_reality_and_keeps_it(tmp_path, fake_remote_factory):
+    first = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, online_sub=False), remote=first)
+    assert result["ports"]["reality"] == 443
+    state = json.loads([p for n, p in first.calls if n == "save deployment state"][-1])
+    second = fake_remote_factory(responses(state=state))
+    assert deploy_vps(cfg(tmp_path, online_sub=False), remote=second)["ports"]["reality"] == 443
+
+
+def test_reality_does_not_take_a_busy_https_port(tmp_path, fake_remote_factory):
+    ss = 'tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=9,fd=6))\n'
+    result = deploy_vps(cfg(tmp_path, online_sub=False), remote=fake_remote_factory(responses(ss=ss)))
+    assert 20000 <= result["ports"]["reality"] <= 29999
+
+
+def test_existing_high_reality_port_is_not_moved(tmp_path, fake_remote_factory):
+    first = fake_remote_factory(responses())
+    deploy_vps(cfg(tmp_path, online_sub=False, reality_port=23456), remote=first)
+    state = json.loads([p for n, p in first.calls if n == "save deployment state"][-1])
+    second = fake_remote_factory(responses(state=state))
+    assert deploy_vps(cfg(tmp_path, online_sub=False), remote=second)["ports"]["reality"] == 23456
+
+
+def test_state_commits_only_after_verification(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    deploy_vps(cfg(tmp_path, online_sub=False), remote=remote)
+    names = called(remote)
+    assert names.index("commit deployment state") > names.index("listener verification")
+
+
+def test_failed_activation_restores_database_and_leaves_state_uncommitted(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses(**{"listener verification": (21, "", "Expected listeners missing")}))
+    with pytest.raises(DeploymentError, match="previous panel database was restored"):
+        deploy_vps(cfg(tmp_path), remote=remote)
+    assert "restore panel database" in called(remote)
+    assert "commit deployment state" not in called(remote)
+    assert not (tmp_path / "out").exists()
+
+
+def test_retry_reuses_pending_identity_and_removes_its_firewall_rules(tmp_path, fake_remote_factory):
+    failed = fake_remote_factory(responses(**{"listener verification": (21, "", "boom")}))
+    with pytest.raises(DeploymentError):
+        deploy_vps(cfg(tmp_path, reality_port=25000), remote=failed)
+    pending = json.loads([p for n, p in failed.calls if n == "save deployment state"][-1])
+    retry = fake_remote_factory(responses(pending=pending))
+    result = deploy_vps(cfg(tmp_path, reality_port=26000, online_sub=False), remote=retry)
+    assert result["nodes"][0]["uri"].split("@")[0].endswith(pending["client_uuid"])
+    firewall = [p for n, p in retry.calls if n == "firewall"][0]
+    assert 'STALE="25000/tcp"' in firewall
+
+
+def test_panel_on_default_web_backend_is_rejected_before_any_change(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    with pytest.raises(DeploymentError, match="8443/tcp is planned for both"):
+        deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com", panel_port=8443), remote=remote)
+    assert "save deployment state" not in called(remote)
+
+
+def test_explicit_port_colliding_with_stored_port_is_rejected(tmp_path, fake_remote_factory):
+    first = fake_remote_factory(responses())
+    deploy_vps(cfg(tmp_path, online_sub=False, reality_port=24000), remote=first)
+    state = json.loads([p for n, p in first.calls if n == "save deployment state"][-1])
+    second = fake_remote_factory(responses(state=state))
+    with pytest.raises(DeploymentError, match="2096/tcp is planned for both"):
+        deploy_vps(cfg(tmp_path, panel_port=2096), remote=second)
+
+
+def test_builtin_subscription_is_opened_and_reported(tmp_path, fake_remote_factory):
+    db = json.dumps({"ok": True, "inbounds": {}, "disabled_stale": [], "backup": "/x.bak",
+                     "sub_paths": {"subPath": "/s/", "subClashPath": "/c/"}})
+    remote = fake_remote_factory(responses(**{"inbound configuration": (0, db, "")}))
+    result = deploy_vps(cfg(tmp_path, online_sub=False, hy2_port=31000), remote=remote)
+    assert 2096 in result["ports"]["public_tcp"]
+    assert result["subscription"]["url"].startswith("http://198.51.100.1:2096/s/")
+    assert "/c/" in result["subscription"]["clash_url"]
+    assert any("does not carry the Hysteria 2 certificate pin" in n for n in result["notes"])
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    assert payload["settings"]["subPort"] == "2096" and payload["settings"]["subClashEnable"] == "true"
+
+
+def test_private_panel_keeps_subscription_private(tmp_path, fake_remote_factory):
+    result = deploy_vps(cfg(tmp_path, online_sub=False, panel_private=True), remote=fake_remote_factory(responses()))
+    assert 2096 not in result["ports"]["public_tcp"] and result["subscription"] == {}
+
+
+def test_extra_protocols_relay_and_residential_are_wired(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, domain="www.example.com", extra_protocols="vmess,trojan",
+                            relays=[{"name": "relay-a", "server": "198.51.100.9", "port": 10031}],
+                            residential=[{"name": "res-a", "server": "203.0.113.5", "port": 12321,
+                                          "username": "user", "password": "secret-pass"}]), remote=remote)
+    routes = {n["name"]: n["route"] for n in result["nodes"]}
+    assert routes["srv-vmess"] == "direct" and routes["srv-trojan"] == "direct"
+    assert routes["relay-a"] == "relay" and routes["res-a"] == "residential"
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    assert {"vps-skill-vmess-ws", "vps-skill-trojan"} <= {i["tag"] for i in payload["inbounds"]}
+    assert result["ports"]["public_tcp"].count(payload["inbounds"][-1]["port"]) == 1
+    assert not any("secret-pass" in url for url in result["online_subscriptions"])
+
+
+def test_cdn_domain_shares_the_https_port(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com",
+                            cdn_domain="cdn.example.com", online_sub=False), remote=remote)
+    routes = [n["route"] for n in result["nodes"]]
+    assert routes.count("cdn") == 3
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    ws = [i for i in payload["inbounds"] if i["stream"]["network"] == "ws"][0]
+    assert ws["listen"] == "127.0.0.1" and ws["stream"]["security"] == "none"
+    assert ws["port"] not in result["ports"]["public_tcp"]
+    website = [p for n, p in remote.calls if n == "website deployment"][0]
+    assert f"location = {ws['stream']['wsSettings']['path']}" in website
+    assert f"proxy_pass http://127.0.0.1:{ws['port']};" in website
+
+
+def test_lxc_style_secondary_container_uses_its_own_https_port(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, domain="app.example.com", https_port=8443, cert_mode="dns-01",
+                            cf_token="a" * 40, reality_port=20160, hy2_port=42973, panel_port=54841,
+                            sub_port=10025, online_sub=False), remote=remote)
+    cdn = [n for n in result["nodes"] if n["route"] == "cdn"][0]
+    assert ":8443?" in cdn["uri"]
+    assert 8443 in result["ports"]["public_tcp"] and 80 not in result["ports"]["public_tcp"]
+    payload = json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])
+    assert [i["port"] for i in payload["inbounds"] if i["stream"]["network"] == "ws"] == [8443]
+    script = [p for n, p in remote.calls if n == "certificate issuance"][0]
+    assert "--dns dns_cf" in script and "CF_Token=" in script
+
+
+def test_probe_failure_note_does_not_claim_nodes_work(tmp_path, fake_remote_factory):
+    probe = json.dumps({"ok": False, "stage": "login", "msg": "denied"})
+    remote = fake_remote_factory(responses(**{"panel login verification": (1, probe, "")}))
+    result = deploy_vps(cfg(tmp_path, online_sub=False), remote=remote)
+    assert not any("fully operational" in n for n in result["notes"])
