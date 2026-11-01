@@ -70,6 +70,24 @@ for url in (sub["url"], sub["clash_url"]):
         assert res.status == 200 and res.read()
 PY
 
+echo "Reboot recovery: a real container boot must heal a disabled service"
+lxc exec vps-01 -- systemctl disable x-ui
+lxc restart vps-01
+for _ in $(seq 1 60); do
+    lxc exec vps-01 -- sh -c 'grep -q "^OK " /var/lib/vps-skill/boot-status' 2>/dev/null && break
+    sleep 3
+done
+lxc exec vps-01 -- grep '^OK ' /var/lib/vps-skill/boot-status
+lxc exec vps-01 -- systemctl is-active x-ui
+"$PY" "$ROOT/tests/e2e/check_clients.py" "$WORK/c1/clash_config.yaml"
+lxc exec vps-02 -- systemctl stop nginx
+lxc restart vps-02
+for _ in $(seq 1 60); do
+    lxc exec vps-02 -- sh -c 'grep -q "^OK " /var/lib/vps-skill/boot-status' 2>/dev/null && break
+    sleep 3
+done
+"$PY" "$ROOT/tests/e2e/check_clients.py" "$WORK/c2/clash_config.yaml" "$HOST_IP"
+
 echo "Resource use after deployment (idle)"
 for c in vps-01 vps-02; do
     lxc exec "$c" -- sh -c '. /etc/os-release; echo "$PRETTY_NAME"; free -m | sed -n 2p; ps -eo rss,comm --sort=-rss | sed -n 2,4p'

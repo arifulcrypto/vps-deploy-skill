@@ -34,7 +34,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts import cloudflare_dns, provision, web_profile  # noqa: E402
+from scripts import boot_check, cloudflare_dns, provision, web_profile  # noqa: E402
 from scripts.clash_generator import generate_local_clash_yaml  # noqa: E402
 from scripts.db_configurator import (REMOTE_DB_SCRIPT, build_db_payload, exit_outbound, hy2_inbound,  # noqa: E402
                                      reality_inbound, trojan_inbound, vision_tls_inbound, vmess_ws_inbound,
@@ -817,6 +817,11 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     elif not probe.get("api_verified"):
         notes.append("Panel login succeeded but the authenticated API check did not; verify the panel manually.")
     remote.run(provision.commit_state_command(), name="commit deployment state")
+    units = ["x-ui"] + (["nginx"] if c["profile"] in WEBSITE_PROFILES else [])
+    remote.run_script("boot self-check", boot_check.install_script(
+        units, tcp_ports, udp_ports, provision.firewall_script(s["public_tcp"], s["public_udp"])))
+    notes.append("Boot self-check enabled: services, firewall and ports are verified after every reboot. "
+                 f"Result: {boot_check.STATUS}")
 
     # Phase 7: local artifacts (only after every check passed)
     print("[*] Phase 7: Writing local artifacts...")
