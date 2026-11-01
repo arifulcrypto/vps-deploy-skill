@@ -366,3 +366,26 @@ def test_manage_dns_runs_before_certificates(tmp_path, fake_remote_factory, monk
     deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com", cdn_domain="cdn.example.com",
                    manage_dns=True, cf_token="a" * 40, online_sub=False), remote=remote)
     assert seen == [("A", "www.example.com", "198.51.100.1", False), ("A", "cdn.example.com", "198.51.100.1", True)]
+
+
+def test_boot_self_check_is_installed_after_the_state_commit(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, online_sub=False, reality_port=24000, hy2_port=31000), remote=remote)
+    names = called(remote)
+    assert names.index("boot self-check") > names.index("commit deployment state")
+    script = [p for n, p in remote.calls if n == "boot self-check"][0]
+    assert "tcp 24000" in script and "udp 31000" in script and "unit x-ui" in script
+    assert any("Boot self-check enabled" in n for n in result["notes"])
+
+
+def test_website_profiles_also_watch_nginx(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    deploy_vps(cfg(tmp_path, profile="reality-self", domain="www.example.com", online_sub=False), remote=remote)
+    assert "unit nginx" in [p for n, p in remote.calls if n == "boot self-check"][0]
+
+
+def test_failed_activation_installs_no_boot_check(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses(**{"listener verification": (21, "", "boom")}))
+    with pytest.raises(DeploymentError):
+        deploy_vps(cfg(tmp_path), remote=remote)
+    assert "boot self-check" not in called(remote)
