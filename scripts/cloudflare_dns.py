@@ -5,7 +5,10 @@ Creates or updates A/AAAA records through the API, using a token limited to
 `Zone: DNS: Edit`. Records this tool creates carry a marker comment, and any other
 record is never changed: a conflict stops the deployment instead.
 """
+import http.client
 import json
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +19,38 @@ from scripts.remote import DeploymentError
 
 API = "https://api.cloudflare.com/client/v4"
 MARKER = "managed by vps-deploy-skill"
+CONNECT_TIMEOUT = 5
+
+
+def _connect_first_working(host: str, port: int, read_timeout: float) -> socket.socket:
+    """IPv4 first, with a short connect timeout: broken IPv6 must not stall every API call."""
+    addresses = sorted(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM), key=lambda a: a[0] != socket.AF_INET)
+    error: Optional[OSError] = None
+    for family, kind, proto, _, address in addresses:
+        sock = socket.socket(family, kind, proto)
+        sock.settimeout(CONNECT_TIMEOUT)
+        try:
+            sock.connect(address)
+            sock.settimeout(read_timeout)
+            return sock
+        except OSError as e:
+            error = e
+            sock.close()
+    raise error or OSError(f"no addresses for {host}")
+
+
+class _Connection(http.client.HTTPSConnection):
+    def connect(self):
+        sock = _connect_first_working(self.host, self.port, self.timeout)
+        self.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+
+
+class _Handler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_Connection, req)
+
+
+_opener = urllib.request.build_opener(_Handler)
 
 
 def _call(token: str, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -23,7 +58,7 @@ def _call(token: str, method: str, path: str, body: Optional[Dict[str, Any]] = N
     request = urllib.request.Request(API + path, data=data, method=method, headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _opener.open(request, timeout=20) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as e:
         try:

@@ -31,7 +31,8 @@ def parse_version(text: Optional[str]) -> Tuple[int, ...]:
 def render_nginx_conf(domains: Sequence[str], backend_port: int, nginx_version: str,
                       cert_path: Optional[str] = None, key_path: Optional[str] = None,
                       ws_path: Optional[str] = None, ws_port: Optional[int] = None,
-                      xhttp_path: Optional[str] = None, xhttp_port: Optional[int] = None) -> str:
+                      xhttp_path: Optional[str] = None, xhttp_port: Optional[int] = None,
+                      plain_port: Optional[int] = None) -> str:
     """
     Without cert paths only the port-80 server is rendered (bootstrap for HTTP-01).
     """
@@ -89,6 +90,8 @@ server {{
         proxy_read_timeout 300s;
     }}
 """
+    # Hysteria masquerade cannot speak PROXY protocol, so it gets its own loopback listener.
+    plain_listen = f"\n    listen 127.0.0.1:{int(plain_port)};" if plain_port else ""
     conf += f"""
 # Unknown or missing SNI: abort like most real-world HTTPS hosts.
 server {{
@@ -97,7 +100,7 @@ server {{
 }}
 
 server {{
-    listen {listen} {listen_opts};
+    listen {listen} {listen_opts};{plain_listen}
 {"    http2 on;" if http2_directive else ""}
     server_name {names};
     server_tokens off;
@@ -124,6 +127,30 @@ server {{
 }}
 """
     return conf
+
+
+def render_http_backend(domains: Sequence[str], backend_port: int) -> str:
+    """vision-tls: Xray owns TLS, so Nginx serves plain HTTP on loopback behind the fallback."""
+    return render_nginx_conf(domains, backend_port, "") + f"""
+server {{
+    listen 127.0.0.1:{int(backend_port)} proxy_protocol;
+    server_name {' '.join(domains)};
+    server_tokens off;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    root {SITE_ROOT};
+    index index.html;
+    error_page 404 /404.html;
+    location / {{
+        try_files $uri $uri/ =404;
+    }}
+}}
+"""
 
 
 def render_site(title: str, description: str) -> Dict[str, str]:

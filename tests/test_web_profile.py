@@ -28,3 +28,11 @@ def test_bootstrap_keeps_a_working_https_config_for_the_same_names():
 def test_rejected_config_restores_the_previous_file():
     script = nginx_apply_script("server {}")
     assert "the previous file was restored" in script and "vps-skill.conf.bak" in script
+
+
+def test_masquerade_listener_is_plain_http_on_the_same_site():
+    text = render_nginx_conf(["www.example.com"], 8443, "1.24.0", "/c/f.pem", "/c/k.pem", plain_port=8444)
+    site = text.split("server_name www.example.com;")[0].rsplit("server {", 1)[1]
+    assert "listen 127.0.0.1:8444;" in text and "8444 ssl" not in text
+    assert "listen 127.0.0.1:8444;" in text.split("ssl_reject_handshake")[1]
+    assert site

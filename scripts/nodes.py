@@ -58,6 +58,17 @@ def reality_node(prefix: str, uuid: str, server: str, port: int, sni: str, publi
     }, qr=True)
 
 
+def vision_tls_node(prefix: str, uuid: str, domain: str, port: int) -> Dict[str, Any]:
+    """VLESS + TLS + Vision with a publicly trusted certificate, for clients without REALITY."""
+    name = f"{prefix}-vision"
+    params = urlencode({"encryption": "none", "flow": "xtls-rprx-vision", "security": "tls", "sni": domain,
+                        "fp": "chrome", "alpn": "http/1.1", "type": "tcp"})
+    return _node(name, "direct", f"vless://{uuid}@{_host(domain)}:{port}?{params}#{quote(name)}", {
+        "type": "vless", "server": domain, "port": port, "uuid": uuid, "network": "tcp", "tls": True, "udp": True,
+        "flow": "xtls-rprx-vision", "servername": domain, "alpn": ["http/1.1"], "client-fingerprint": "chrome",
+    }, qr=True)
+
+
 def hy2_node(prefix: str, password: str, server: str, port: int, sni: Optional[str] = None,
              pin_sha256: Optional[str] = None, obfs_password: Optional[str] = None,
              up_mbps: Optional[int] = None, down_mbps: Optional[int] = None) -> Dict[str, Any]:

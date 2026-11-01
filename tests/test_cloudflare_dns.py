@@ -85,3 +85,30 @@ def test_planned_records_follow_the_profile():
 def test_wait_for_dns_stops_when_visible_and_gives_up_otherwise():
     assert wait_for_dns("x", "1.2.3.4", resolve=lambda n: ["1.2.3.4"])
     assert not wait_for_dns("x", "1.2.3.4", timeout=0, resolve=lambda n: [])
+
+
+def test_unreachable_ipv6_does_not_block_a_working_ipv4_address(monkeypatch):
+    import socket
+
+    from scripts import cloudflare_dns
+    connected = []
+
+    class FakeSocket:
+        def __init__(self, family, kind, proto):
+            self.family = family
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            connected.append(self.family)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443))])
+    monkeypatch.setattr(socket, "socket", FakeSocket)
+    cloudflare_dns._connect_first_working("api.cloudflare.com", 443, 20)
+    assert connected == [socket.AF_INET]

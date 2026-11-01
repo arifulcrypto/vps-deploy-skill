@@ -233,6 +233,28 @@ def hy2_inbound(identity, port: int, server_name: str, cert_path: str, key_path:
     }
 
 
+def vision_tls_inbound(identity, port: int, domain: str, cert_path: str, key_path: str,
+                       fallback_port: int) -> Dict[str, Any]:
+    """Xray terminates TLS. Anything that is not this client falls back to the local website."""
+    tls = _tls_settings(domain, cert_path, key_path, ["http/1.1"])
+    tls["rejectUnknownSni"] = True
+    return {
+        "tag": f"{TAG_PREFIX}vision",
+        "port": port,
+        "transport": "tcp",
+        "protocol": "vless",
+        "remark": "vps-skill-vision",
+        "settings": {"decryption": "none", "fallbacks": [{"dest": f"127.0.0.1:{fallback_port}", "xver": 1}]},
+        "client": _client(identity, flow="xtls-rprx-vision"),
+        "stream": {
+            "network": "tcp",
+            "security": "tls",
+            "tlsSettings": tls,
+            "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
+        },
+    }
+
+
 def reality_inbound(identity, port: int, target: str, server_names: List[str], private_key: str,
                     public_key: str, short_id: str, xver: int = 0, tag: str = "reality") -> Dict[str, Any]:
     return {
