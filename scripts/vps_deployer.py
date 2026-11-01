@@ -152,6 +152,8 @@ def validate_config(cfg: Dict[str, Any]) -> None:
             raise DeploymentError(f"Invalid exit_proxy protocol. Choose one of: {', '.join(EXIT_PROTOCOLS)}")
         if bool(exit_proxy.get("username")) != bool(exit_proxy.get("password")):
             raise DeploymentError("exit_proxy needs both username and password, or neither.")
+    if _flag(cfg, "exit_all", False) and not exit_proxy:
+        raise DeploymentError("exit_all needs exit_proxy.")
     if _flag(cfg, "hy2_masquerade", False):
         if profile != "reality-self":
             raise DeploymentError("hy2_masquerade needs profile 'reality-self', which provides the website.")
@@ -263,6 +265,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "manage_dns": _flag(cfg, "manage_dns", False),
         "exit_proxy": cfg.get("exit_proxy") or None,
         "exit_port": int(cfg["exit_port"]) if cfg.get("exit_port") else None,
+        "exit_all": _flag(cfg, "exit_all", False),
         "hy2_masquerade": _flag(cfg, "hy2_masquerade", False),
         "https_port": int(cfg.get("https_port") or 443),
         "cert_mode": _str(cfg, "cert_mode") or "http-01",
@@ -392,7 +395,7 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
         s["reality_port"] = choose("reality", "tcp", taken)
     taken |= {s["reality_port"]}
     s["hy2_port"] = choose("hy2", "udp", set()) if c["enable_hy2"] else None
-    for kind in c["extra_protocols"] + (["exit"] if c["exit_proxy"] else []):
+    for kind in c["extra_protocols"] + (["exit"] if c["exit_proxy"] and not c["exit_all"] else []):
         s[f"{kind}_port"] = choose(kind, "tcp", taken)
         taken |= {s[f"{kind}_port"]}
     s["sub_port"] = c["sub_port"] if c["enable_sub"] else None
@@ -420,7 +423,7 @@ def build_plan(c: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
         if c.get("panel_domain") and http_validation:
             tcp_public.append(80)
     tcp_public += [s[f"{kind}_port"] for kind in c["extra_protocols"]]
-    if c["exit_proxy"]:
+    if s.get("exit_port"):
         tcp_public.append(s["exit_port"])
     s["public_tcp"] = sorted(set(tcp_public))
     s["public_udp"] = [s["hy2_port"]] if s["hy2_port"] else []
@@ -526,7 +529,7 @@ def build_inbounds(c: Dict[str, Any], s: Dict[str, Any], cert: Optional[Tuple[st
         if not cert:
             raise DeploymentError("Trojan needs a certificate, but none was issued.")
         inbounds.append(trojan_inbound(identity, s["trojan_port"], c["domain"], cert[0], cert[1]))
-    if c["exit_proxy"]:
+    if s.get("exit_port"):
         if c["profile"] == "reality-self":
             target, names, xver = f"127.0.0.1:{c['web_backend_port']}", [c["domain"]], 1
         else:
@@ -568,10 +571,13 @@ def build_nodes(c: Dict[str, Any], s: Dict[str, Any], cert_ok: bool, hy2_pin: Op
                                    s["vmess_port"], s["vmess_path"], host=c["domain"] if tls else None, tls=tls))
     if "trojan" in c["extra_protocols"]:
         nodes.append(trojan_node(f"{prefix}-trojan", s["node_pass"], c["domain"], s["trojan_port"], sni=c["domain"]))
-    if c["exit_proxy"]:
+    if s.get("exit_port"):
         server, sni = (c["domain"], c["domain"]) if c["profile"] == "reality-self" else (c["ip"], c["reality_sni"])
         nodes.append(reality_node(prefix, s["client_uuid"], server, s["exit_port"], sni, s["reality_public_key"],
                                   s["reality_short_id"], name=f"{prefix}-exit", route="residential"))
+    if c["exit_all"]:
+        for node in nodes:
+            node["route"] = "residential"
     for relay in c["relays"]:
         nodes.append(relay_reality_node(relay["name"], relay["server"], int(relay["port"]), nodes[0]))
     for proxy in c["residential"]:
@@ -769,7 +775,8 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     identity = {"email": s["email"], "uuid": s["client_uuid"], "sub_id": s["sub_id"], "node_pass": s["node_pass"]}
     outbound = exit_outbound(c["exit_proxy"]) if c["exit_proxy"] else None
     res = remote.run_python("inbound configuration", REMOTE_DB_SCRIPT,
-                            build_db_payload(identity, inbounds, settings, outbound=outbound), check=False)
+                            build_db_payload(identity, inbounds, settings, outbound=outbound,
+                                             exit_all=c["exit_all"]), check=False)
     db = last_json_line(res.stdout) or {}
     if not db.get("ok"):
         detail = db.get("error") or (res.stderr.strip()[-400:] or "no output")
@@ -945,6 +952,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--manage-dns", action="store_true", default=None,
                         help="Create or update the Cloudflare records. Needs a token with Zone: DNS: Edit")
     parser.add_argument("--exit-port", type=int, help="Port of the inbound that exits through exit_proxy")
+    parser.add_argument("--exit-all", action="store_true", default=None,
+                        help="Send every inbound through exit_proxy and block QUIC, for a fully residential node")
     parser.add_argument("--hy2-masquerade", action="store_true", default=None,
                         help="reality-self: answer non-Hysteria HTTP/3 with the website. Needs --no-hy2-obfs")
     parser.add_argument("--hy2-obfs", action=argparse.BooleanOptionalAction, default=None,

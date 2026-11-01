@@ -1,4 +1,80 @@
+# VPS Deployer Skill
 
+> 由 AI 智能体或命令行在 Linux VPS 上部署并维护 3X-UI 代理节点。
+> *支持 OpenAI GPTs、Anthropic Claude、Google Gemini / Antigravity 以及独立 CLI。*
+
+[English](../README.md) | [中文说明](./README_zh.md)
+
+---
+
+## 概览
+
+- **两种方案**：`reality-self` 只使用 TCP 443——合法的 VLESS-REALITY-Vision 客户端走代理，其余连接经本机 Nginx 看到运营者自己的 HTTPS 网站；`legacy` 保留多端口布局（REALITY 随机高端口、可选 Hysteria 2、Cloudflare 后的 443 VLESS-WS-TLS）。
+- **验证通过才算成功**：任何远程步骤或监听检查失败都不会生成报告、链接或二维码。面板登录探测默认只产生警告，使用 `--fail-closed` 后才会使部署失败。ACME 失败即报错，不会回退到自签证书。
+- **默认无破坏**：不动已有 Web 服务、其他 3X-UI 入站与客户端、2FA 和面板证书；破坏性操作需显式开关。改库前备份并在单个事务中写入。
+- **重复部署稳定**：身份、密钥与端口保存在服务器 `/etc/vps-skill/state.json` 并复用；防火墙规则幂等管理（ufw、firewalld 或独立 iptables 链）。
+- **默认公开面板**：面板默认监听 `0.0.0.0` 并开放防火墙端口，使用 `--panel-private` 可改为仅 `127.0.0.1`（SSH 隧道访问）；产物在 0700 目录中以 0600 写入；Clash YAML 在本地生成。
+
+完整参数、执行流程与排错见 [`SKILL_zh.md`](./SKILL_zh.md)（以英文 [`SKILL.md`](../SKILL.md) 为准）。
+
+## 快速开始
+
+```bash
+git clone https://github.com/arifulcrypto/vps-deploy-skill.git
+cd vps-deploy-skill
+pip install -r requirements.txt          # 密码登录需本机安装 openssh-client 与 sshpass
+
+# 1. 仅生成计划（不改动服务器）
+python3 scripts/vps_deployer.py --config examples/input_reality_self.json --dry-run
+
+# 2. 正式部署（密码通过环境变量传入，避免出现在进程参数中）
+VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reality_self.json
+```
+
+`reality-self` 需要一个指向 VPS 的 **仅 DNS（灰云）** A 记录。常用参数：
+
+| 参数 | 作用 |
+| :--- | :--- |
+| `--profile {unified,legacy,reality-self,vision-tls}` | 部署方案（默认 `unified`，`legacy` 为别名） |
+| `--domain`、`--ipv6-domain`、`--panel-domain` | 域名（各方案的 DNS 模式见 SKILL） |
+| `--hy2 / --no-hy2` | 开关 Hysteria 2 |
+| `--ssh-key`、`--ssh-known-hosts` | 密钥登录；预置主机指纹，替代首次信任 |
+| `--xui-version v3.11.0` | 固定 3X-UI 版本 |
+| `--adopt-existing-panel` | 接管非本 Skill 安装的 3X-UI |
+| `--stop-conflicting-services` | 停止并禁用占用 80/443 的 Web 服务 |
+| `--rotate-secrets` | 生成新的 UUID/密码/REALITY 密钥（旧链接失效） |
+| `--online-sub` | 额外输出第三方订阅转换链接（会把凭据发送给对方） |
+
+## 输出
+
+```text
+output/<ip>/                 （目录 0700，文件 0600——包含凭据）
+├── vps_<ip>_info.txt        报告（链接与终端二维码）
+├── result.json              机器可读结果
+├── clash_config.yaml        本地 Clash/Mihomo 配置
+└── qr_<节点>.png             二维码
+```
+
+## 开发
+
+```bash
+pip install -r requirements-dev.txt
+ruff check scripts tests && pytest -q
+```
+
+## 许可证
+
+MIT，详见 [LICENSE](../LICENSE)。
+
+## 近期行为更新
+
+- `unified` 且未配置域名时，REALITY 默认使用空闲的 443 端口，已部署节点保留原端口。
+- `reality-self` 可通过 `--cdn-domain` 让 REALITY、Cloudflare WebSocket 和网站共用同一个 HTTPS 端口。
+- 面板公开时默认发布 3X-UI 内置订阅（`--no-sub` 关闭）。
+- `--extra-protocols vmess,trojan` 按需开启兼容协议；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口请使用 `exit_proxy`。
+- 激活失败时恢复之前的面板数据库，`state.json` 只记录最后一次验证通过的部署。
+- 配合 vps-lxc-skill 时使用 `--from-lxc result.json --container <名称>`。
+- Hysteria 2 默认不再声明带宽（使用 BBR），`--hy2-up` 与 `--hy2-down` 同时设置时才使用 Brutal。
 
 ## 重启规则
 
@@ -7,3 +83,12 @@
 - 每次开机后 `vps-skill-bootcheck.timer` 会重新应用防火墙，启动 `x-ui` 和 Nginx，确认所有计划端口都在监听，端口持续缺失时重启一次 `x-ui`，结果写入 `/var/lib/vps-skill/boot-status`。
 - 重启后等待 3 分钟再查看状态。`OK` 表示无需操作；`FAILED` 会列出异常项，查看 `/var/log/vps-skill-bootcheck.log`，修复后运行 `systemctl start vps-skill-bootcheck.service`。
 - 不要把再次重启作为第一步。配合 vps-lxc-skill 时，还要查看宿主机的 `/var/lib/vps-lxc/boot-status`。
+
+## 住宅与中转出口
+
+- 整个节点走住宅代理：`exit_proxy` + `exit_all: true`（会拦截 QUIC，防止绕过代理泄露 VPS IP）。
+- 单独增加一个住宅节点：`exit_proxy` + `exit_port`。
+- 自有落地机中转：用 Realm 转发，再用 `relays` 生成节点。
+- DataImpulse 粘性会话用户名格式：`USER__cr.us;sessid.NAME;sessttl.1440`，最长 24 小时保持同一 IP，到期后客户端自动重连并获得新 IP。
+- 住宅节点是计费流量，绝不能放入自动测速组。
+- 多台服务器合并客户端配置：`python3 scripts/merge_clash.py --output cluster.yaml c1.yaml:direct c2.yaml:residential c3.yaml:relay`

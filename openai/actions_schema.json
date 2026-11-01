@@ -362,6 +362,11 @@
                 "default": "socks"
               }
             }
+          },
+          "exit_all": {
+            "type": "boolean",
+            "default": false,
+            "description": "Send every inbound through exit_proxy and block QUIC"
           }
         }
       },

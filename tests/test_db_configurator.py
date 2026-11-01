@@ -150,3 +150,19 @@ def test_exit_outbound_is_added_once_and_keeps_the_template(xui_db, tmp_path):
     saved = json.loads(rows(xui_db, "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")[0][0])
     assert [o["tag"] for o in saved["outbounds"]] == ["direct"]
     assert [r.get("outboundTag") for r in saved["routing"]["rules"]] == ["blocked"]
+
+
+def test_exit_all_routes_every_inbound_and_blocks_quic(xui_db, tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"inbounds": [], "outbounds": [{"tag": "direct"}], "routing": {"rules": []}}))
+    outbound = {"tag": "vps-skill-exit", "protocol": "socks", "settings": {}}
+    inbounds = [reality_inbound(IDENTITY, 20001, "a.example.com:443", ["a.example.com"], "priv", "pub", "ab12")]
+    assert run_db_script(build_db_payload(IDENTITY, inbounds, {}, db_path=xui_db, outbound=outbound,
+                                          xray_config=str(config), exit_all=True))[0] == 0
+    saved = json.loads(rows(xui_db, "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")[0][0])
+    block, route = saved["routing"]["rules"]
+    assert block["network"] == "udp" and block["outboundTag"] == "blocked" and block["port"] == "443"
+    assert route["inboundTag"] == ["vps-skill-reality"] and route["outboundTag"] == "vps-skill-exit"
+    assert run_db_script(build_db_payload(IDENTITY, inbounds, {}, db_path=xui_db))[0] == 0
+    saved = json.loads(rows(xui_db, "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")[0][0])
+    assert saved["routing"]["rules"] == []

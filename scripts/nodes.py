@@ -49,7 +49,8 @@ def reality_node(prefix: str, uuid: str, server: str, port: int, sni: str, publi
                  short_id: str, name: Optional[str] = None, route: str = "direct") -> Dict[str, Any]:
     name = name or f"{prefix}-reality"
     params = urlencode({"encryption": "none", "flow": "xtls-rprx-vision", "security": "reality", "sni": sni,
-                        "fp": "chrome", "pbk": public_key, "sid": short_id, "type": "tcp"})
+                        "fp": "chrome", "pbk": public_key, "sid": short_id, "type": "tcp",
+                        "support-x25519mlkem768": "true"})
     return _node(name, route, f"vless://{uuid}@{_host(server)}:{port}?{params}#{quote(name)}", {
         "type": "vless", "server": server, "port": port, "uuid": uuid, "network": "tcp", "tls": True,
         "udp": True, "flow": "xtls-rprx-vision", "servername": sni,
