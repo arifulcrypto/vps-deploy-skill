@@ -13,9 +13,10 @@
 ## Overview
 
 - **Two profiles.** `reality-self` puts everything on TCP 443: valid VLESS-REALITY-Vision clients are
-  proxied, every other connection reaches the operator's own HTTPS website through a loopback Nginx.
-  `legacy` keeps the multi-port layout (REALITY on a random high port, optional Hysteria 2, VLESS-WS-TLS
-  on 443 behind Cloudflare).
+  proxied, every other connection reaches the operator's own HTTPS website through a loopback Nginx, and
+  an optional `--cdn-domain` adds a Cloudflare WebSocket path on the same port.
+  `unified` (default, `legacy` is an alias) uses REALITY plus Hysteria 2, with VLESS-WS-TLS on 443 behind
+  Cloudflare when a domain is set. REALITY takes a free 443 when no domain needs it, otherwise a random high port.
 - **Checked before success.** No report, links or QR codes unless every remote step and listener check passes. The panel login probe is a warning unless you pass `--fail-closed`. A failed activation restores the previous panel database, and `state.json` only holds the last verified deployment.
   probe and website check succeeds. ACME failures are errors, never a silent self-signed certificate.
 - **Non-destructive.** Existing web servers, foreign 3X-UI inbounds and clients, 2FA and panel TLS are

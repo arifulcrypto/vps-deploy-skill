@@ -19,12 +19,12 @@ echo "::endgroup::"
 echo "::group::Test certificate for the second container"
 PKI="$WORK/pki"; mkdir -p "$PKI"
 openssl ecparam -name prime256v1 -genkey -noout -out "$PKI/ca.key" 2>/dev/null
-openssl req -new -x509 -key "$PKI/ca.key" -out "$PKI/ca.pem" -days 2 -subj '/CN=Stack Test CA' 2>/dev/null
+openssl req -new -x509 -key "$PKI/ca.key" -out "$PKI/ca.pem" -days 30 -subj '/CN=Stack Test CA' 2>/dev/null
 openssl ecparam -name prime256v1 -genkey -noout -out "$PKI/leaf.key" 2>/dev/null
 openssl req -new -key "$PKI/leaf.key" -out "$PKI/leaf.csr" -subj "/CN=$DOMAIN" 2>/dev/null
 printf 'subjectAltName=DNS:%s,DNS:%s\n' "$DOMAIN" "$CDN" > "$PKI/san"
 openssl x509 -req -in "$PKI/leaf.csr" -CA "$PKI/ca.pem" -CAkey "$PKI/ca.key" -CAcreateserial \
-    -out "$PKI/leaf.pem" -days 2 -extfile "$PKI/san" 2>/dev/null
+    -out "$PKI/leaf.pem" -days 30 -extfile "$PKI/san" 2>/dev/null
 cat "$PKI/leaf.pem" "$PKI/ca.pem" > "$PKI/fullchain.pem"
 lxc exec vps-02 -- mkdir -p "/root/cert/$DOMAIN"
 lxc file push "$PKI/fullchain.pem" "vps-02/root/cert/$DOMAIN/fullchain.pem"

@@ -10,10 +10,10 @@
 ## 概览
 
 - **两种方案**：`reality-self` 只使用 TCP 443——合法的 VLESS-REALITY-Vision 客户端走代理，其余连接经本机 Nginx 看到运营者自己的 HTTPS 网站；`legacy` 保留多端口布局（REALITY 随机高端口、可选 Hysteria 2、Cloudflare 后的 443 VLESS-WS-TLS）。
-- **失败即停止**：任何远程步骤、监听检查、面板登录探测或网站检查失败都不会生成报告、链接或二维码；ACME 失败直接报错，不会悄悄换成自签证书。
+- **验证通过才算成功**：任何远程步骤或监听检查失败都不会生成报告、链接或二维码。面板登录探测默认只产生警告，使用 `--fail-closed` 后才会使部署失败。ACME 失败即报错，不会回退到自签证书。
 - **默认无破坏**：不动已有 Web 服务、其他 3X-UI 入站与客户端、2FA 和面板证书；破坏性操作需显式开关。改库前备份并在单个事务中写入。
 - **重复部署稳定**：身份、密钥与端口保存在服务器 `/etc/vps-skill/state.json` 并复用；防火墙规则幂等管理（ufw、firewalld 或独立 iptables 链）。
-- **默认私有**：面板仅监听 `127.0.0.1`（SSH 隧道访问）；产物在 0700 目录中以 0600 写入；Clash YAML 本地生成，第三方转换需显式开启。
+- **默认公开面板**：面板默认监听 `0.0.0.0` 并开放防火墙端口，使用 `--panel-private` 可改为仅 `127.0.0.1`（SSH 隧道访问）；产物在 0700 目录中以 0600 写入；Clash YAML 在本地生成。
 
 完整参数、执行流程与排错见 [`SKILL_zh.md`](./SKILL_zh.md)（以英文 [`SKILL.md`](../SKILL.md) 为准）。
 
@@ -35,7 +35,7 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 
 | 参数 | 作用 |
 | :--- | :--- |
-| `--profile {legacy,reality-self}` | 部署方案（默认 `legacy`） |
+| `--profile {unified,legacy,reality-self}` | 部署方案（默认 `unified`，`legacy` 为别名） |
 | `--domain`、`--ipv6-domain`、`--panel-domain` | 域名（各方案的 DNS 模式见 SKILL） |
 | `--hy2 / --no-hy2` | 开关 Hysteria 2 |
 | `--ssh-key`、`--ssh-known-hosts` | 密钥登录；预置主机指纹，替代首次信任 |
