@@ -112,3 +112,20 @@ def test_profile_switch_disables_only_stale_owned_inbounds(xui_db):
 def test_missing_database_reports_error(tmp_path):
     rc, out = run_db_script(payload(str(tmp_path / "absent.db")))
     assert rc == 2 and "not found" in out["error"]
+
+
+def test_client_traffic_row_is_created_once_and_keeps_counters(xui_db):
+    conn = sqlite3.connect(xui_db)
+    conn.execute("CREATE TABLE client_traffics (id INTEGER PRIMARY KEY AUTOINCREMENT, inbound_id INTEGER, enable NUMERIC, "
+                 "email TEXT UNIQUE, up INTEGER, down INTEGER, expiry_time INTEGER, total INTEGER, reset INTEGER)")
+    conn.commit()
+    conn.close()
+    spec = payload(xui_db)
+    assert run_db_script(spec)[0] == 0
+    conn = sqlite3.connect(xui_db)
+    conn.execute("UPDATE client_traffics SET up = 5, down = 7")
+    conn.commit()
+    conn.close()
+    assert run_db_script(spec)[0] == 0
+    conn = sqlite3.connect(xui_db)
+    assert conn.execute("SELECT email, up, down FROM client_traffics").fetchall() == [(IDENTITY["email"], 5, 7)]

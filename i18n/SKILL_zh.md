@@ -63,3 +63,12 @@ description: >-
 | `Expected listeners missing` | Xray 拒绝了配置 | 查看日志摘录；可考虑固定 `xui_version` |
 | `Panel login verification failed` | 凭据未通过验证（未做任何重置） | 若开启了 2FA，请手动登录确认 |
 | `Port 443 did not serve the deployed website` | REALITY → Nginx 链路异常 | 检查 `nginx -t` 与 `/etc/nginx/conf.d/vps-skill.conf` |
+
+## 近期行为更新
+
+- `unified` 且未配置域名时，REALITY 默认使用空闲的 443 端口，已部署节点保留原端口。
+- `reality-self` 可通过 `cdn_domain` 让 REALITY、Cloudflare WebSocket 和网站共用同一个 HTTPS 端口。
+- 面板公开时默认发布 3X-UI 内置订阅，自签 Hysteria 2 的证书固定值不包含在内置订阅中。
+- `extra_protocols` 按需开启 VMess、Trojan；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口路由尚未实现。
+- `cert_mode: dns-01` 通过 Cloudflare 签发证书，用于没有公网 80 端口的容器，尚未在真实 Cloudflare 上验证。
+- 面板登录探测默认只产生警告，`fail_closed` 开启后才会使部署失败。

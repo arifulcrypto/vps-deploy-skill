@@ -16,7 +16,7 @@
   proxied, every other connection reaches the operator's own HTTPS website through a loopback Nginx.
   `legacy` keeps the multi-port layout (REALITY on a random high port, optional Hysteria 2, VLESS-WS-TLS
   on 443 behind Cloudflare).
-- **Fail closed.** No report, links or QR codes unless every remote step, listener check, panel login
+- **Checked before success.** No report, links or QR codes unless every remote step and listener check passes. The panel login probe is a warning unless you pass `--fail-closed`. A failed activation restores the previous panel database, and `state.json` only holds the last verified deployment.
   probe and website check succeeds. ACME failures are errors, never a silent self-signed certificate.
 - **Non-destructive.** Existing web servers, foreign 3X-UI inbounds and clients, 2FA and panel TLS are
   left alone; destructive actions require explicit flags. The panel database is backed up and updated
@@ -58,7 +58,7 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 
 | Flag | Purpose |
 | :--- | :--- |
-| `--profile {legacy,reality-self}` | Deployment profile (default `legacy`) |
+| `--profile {unified,legacy,reality-self}` | Deployment profile (default `unified`; `legacy` is an alias) |
 | `--domain`, `--ipv6-domain`, `--panel-domain` | Hostnames (see SKILL.md for DNS mode per profile) |
 | `--hy2 / --no-hy2` | Toggle Hysteria 2 |
 | `--ssh-key`, `--ssh-known-hosts` | Key authentication; pinned host key instead of trust-on-first-use |
@@ -66,7 +66,14 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 | `--adopt-existing-panel` | Manage a 3X-UI that this skill did not install |
 | `--stop-conflicting-services` | Stop and disable a web server occupying 80/443 |
 | `--rotate-secrets` | Issue new UUID/passwords/REALITY keys (old links stop working) |
-| `--online-sub` | Also print third-party converter URLs (they receive your credentials) |
+| `--online-sub / --no-online-sub` | Third-party converter URLs, on by default (they receive your node credentials) |
+| `--sub / --no-sub`, `--sub-port` | 3X-UI built-in subscription, on by default when the panel is public |
+| `--cdn-domain` | `reality-self`: Cloudflare hostname sharing the HTTPS port with REALITY and the website |
+| `--extra-protocols vmess,trojan` | Opt-in compatibility inbounds (`--vmess-port`, `--trojan-port`) |
+| `--https-port`, `--web-backend-port` | Public HTTPS port and the `reality-self` loopback website port |
+| `--cert-mode {http-01,dns-01}`, `CF_TOKEN` | DNS-01 through Cloudflare, for hosts without public port 80 (not yet tested with real Cloudflare) |
+| `--hy2-up`, `--hy2-down` | Client Mbps for Hysteria 2. Unset means BBR. Setting them selects Brutal |
+| `--from-lxc result.json --container <name>` | Take ports and access from vps-lxc-skill |
 
 ## Agent integration
 

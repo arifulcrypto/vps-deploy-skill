@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 STATE_DIR = "/etc/vps-skill"
 STATE_FILE = f"{STATE_DIR}/state.json"
+PENDING_STATE_FILE = f"{STATE_DIR}/state.pending.json"
 HY2_SELF_SIGNED_DIR = f"{STATE_DIR}/hy2"
 XUI_BIN = "/usr/local/x-ui/x-ui"
 XUI_INSTALL_URL = "https://raw.githubusercontent.com/MHSanaei/3x-ui/{ref}/install.sh"
@@ -32,6 +33,7 @@ def preflight_script() -> str:
 echo "ARCH=$(uname -m)"
 [ -x {XUI_BIN} ] && echo XUI=1 || echo XUI=0
 [ -s {STATE_FILE} ] && echo STATE=1 || echo STATE=0
+[ -s {PENDING_STATE_FILE} ] && echo PENDING=1 || echo PENDING=0
 command -v python3 >/dev/null 2>&1 && echo PY=1 || echo PY=0
 command -v nginx >/dev/null 2>&1 && echo "NGINX=$(nginx -v 2>&1 | sed -n 's#.*nginx/\\([0-9.]*\\).*#\\1#p')" || echo NGINX=
 echo "---LISTENERS---"
@@ -140,28 +142,38 @@ def firewall_script(tcp: Sequence[int], udp: Sequence[int], stale_tcp: Sequence[
     stale = [f"{int(p)}/tcp" for p in sorted(set(stale_tcp) - set(tcp))] + \
             [f"{int(p)}/udp" for p in sorted(set(stale_udp) - set(udp))]
     ipt_rules = "\n".join(
-        f'        "$ipt" -A VPS_SKILL -p {r.split("/")[1]} --dport {r.split("/")[0]} -j ACCEPT' for r in wanted
+        f'        "$ipt" -A VPS_SKILL -p {r.split("/")[1]} --dport {r.split("/")[0]} -j ACCEPT || return 1' for r in wanted
     )
     return f"""
 WANTED="{' '.join(wanted)}"
 STALE="{' '.join(stale)}"
+fail() {{ echo "firewall: $*" >&2; exit 40; }}
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
     for r in $STALE; do ufw --force delete allow "$r" >/dev/null 2>&1 || true; done
-    for r in $WANTED; do ufw allow "$r" comment vps-skill >/dev/null; done
+    for r in $WANTED; do ufw allow "$r" comment vps-skill >/dev/null || fail "ufw allow $r"; done
+    rules=$(ufw status) || fail "ufw status"
+    for r in $WANTED; do printf '%s\n' "$rules" | grep -q "^$r " || fail "rule $r is not active"; done
     echo FIREWALL=ufw
 elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     for r in $STALE; do firewall-cmd --permanent --remove-port="$r" >/dev/null 2>&1 || true; done
-    for r in $WANTED; do firewall-cmd --permanent --add-port="$r" >/dev/null; done
-    firewall-cmd --reload >/dev/null
+    for r in $WANTED; do firewall-cmd --permanent --add-port="$r" >/dev/null || fail "firewalld add $r"; done
+    firewall-cmd --reload >/dev/null || fail "firewalld reload"
+    for r in $WANTED; do firewall-cmd --query-port="$r" >/dev/null || fail "rule $r is not active"; done
     echo FIREWALL=firewalld
 elif command -v iptables >/dev/null 2>&1; then
-    for ipt in iptables ip6tables; do
-        command -v "$ipt" >/dev/null 2>&1 || continue
+    # IPv4 rules are required. IPv6 is best effort, since many hosts run without it.
+    build_chain() {{
+        ipt=$1
         "$ipt" -N VPS_SKILL 2>/dev/null || true
-        "$ipt" -F VPS_SKILL
-        "$ipt" -C INPUT -j VPS_SKILL 2>/dev/null || "$ipt" -I INPUT -j VPS_SKILL
+        "$ipt" -F VPS_SKILL || return 1
+        "$ipt" -C INPUT -j VPS_SKILL 2>/dev/null || "$ipt" -I INPUT -j VPS_SKILL || return 1
 {ipt_rules}
-    done
+        return 0
+    }}
+    build_chain iptables || fail "iptables rules could not be applied"
+    if command -v ip6tables >/dev/null 2>&1; then
+        build_chain ip6tables || echo FIREWALL_V6=failed
+    fi
     if command -v netfilter-persistent >/dev/null 2>&1; then
         netfilter-persistent save >/dev/null 2>&1 && echo FIREWALL_PERSISTED=1
     elif command -v service >/dev/null 2>&1 && [ -f /etc/sysconfig/iptables ]; then
@@ -197,16 +209,20 @@ check_cert() {
 
 
 def cert_script(domains: Sequence[str], cert_dir: str, mode: str, reload_cmd: str,
-                webroot: Optional[str] = None, email: Optional[str] = None) -> str:
+                webroot: Optional[str] = None, email: Optional[str] = None,
+                cf_token: Optional[str] = None) -> str:
     """
     Ensure a publicly trusted ECC certificate covering all `domains`.
     Fails closed: there is no self-signed fallback.
-    mode: 'standalone' (acme.sh binds :80) or 'webroot' (existing web server serves :80).
+    mode: 'standalone' (acme.sh binds :80), 'webroot' (existing web server serves :80) or
+    'dns' (Cloudflare DNS-01, for containers that do not receive public port 80).
     """
-    if mode not in ("standalone", "webroot"):
-        raise ValueError("mode must be 'standalone' or 'webroot'")
+    if mode not in ("standalone", "webroot", "dns"):
+        raise ValueError("mode must be 'standalone', 'webroot' or 'dns'")
     d_flags = " ".join(f"-d {q(d)}" for d in domains)
-    mode_flags = "--standalone" if mode == "standalone" else f"--webroot {q(webroot or '')}"
+    mode_flags = {"standalone": "--standalone", "webroot": f"--webroot {q(webroot or '')}",
+                  "dns": "--dns dns_cf"}[mode]
+    dns_env = f"export CF_Token={q(cf_token or '')}" if mode == "dns" else ""
     install_email = f"email={q(email)}" if email else ""
     return f"""
 set -u
@@ -224,10 +240,11 @@ if [ ! -x "$ACME" ]; then
     rm -f /tmp/vps-skill-acme-install.sh
 fi
 "$ACME" --set-default-ca --server letsencrypt >/dev/null </dev/null
+{dns_env}
 "$ACME" --issue {d_flags} {mode_flags} --keylength ec-256 </dev/null
 rc=$?
 # 0 = issued, 2 = existing acme.sh certificate is not yet due for renewal
-if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then echo "acme.sh --issue failed (exit $rc); check DNS (A/AAAA, grey cloud for HTTP-01) and port 80 reachability" >&2; exit 11; fi
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then echo "acme.sh --issue failed (exit $rc); check DNS records and the validation path (port 80 for HTTP-01, token permissions for DNS-01)" >&2; exit 11; fi
 mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
 "$ACME" --install-cert -d {q(domains[0])} --ecc --fullchain-file "$FULLCHAIN" --key-file "$KEY" \\
     --reloadcmd {q(reload_cmd)} </dev/null || {{ echo "acme.sh --install-cert failed" >&2; exit 12; }}
@@ -313,13 +330,26 @@ def parse_x25519(stdout: str) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def save_state_command() -> str:
-    """Command that atomically writes stdin to the state file with 0600 permissions."""
-    return (f"umask 077 && mkdir -p {STATE_DIR} && cat > {STATE_FILE}.tmp && "
-            f"mv {STATE_FILE}.tmp {STATE_FILE}")
+    """
+    Atomically store the candidate plan (stdin) with 0600 permissions. state.json only ever
+    holds the last deployment that passed verification; see commit_state_command().
+    """
+    return (f"umask 077 && mkdir -p {STATE_DIR} && cat > {PENDING_STATE_FILE}.tmp && "
+            f"mv {PENDING_STATE_FILE}.tmp {PENDING_STATE_FILE}")
 
 
-def load_state_command() -> str:
-    return f"cat {STATE_FILE} 2>/dev/null || true"
+def commit_state_command() -> str:
+    return f"mv {PENDING_STATE_FILE} {STATE_FILE}"
+
+
+def load_state_command(path: str = STATE_FILE) -> str:
+    return f"cat {path} 2>/dev/null || true"
+
+
+def restore_db_command(backup: str, db_path: str = "/etc/x-ui/x-ui.db") -> str:
+    """Put the pre-deployment panel database back and restart the panel."""
+    return (f"systemctl stop x-ui; rm -f {q(db_path)}-wal {q(db_path)}-shm; "
+            f"cp -f {q(backup)} {q(db_path)} && systemctl start x-ui")
 
 
 def verify_listeners_script(tcp: Sequence[int], udp: Sequence[int], wait_seconds: int = 15) -> str:

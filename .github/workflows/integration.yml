@@ -1,0 +1,36 @@
+name: Integration
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        repository: arifulcrypto/vps-lxc-skill
+        path: lxc-skill
+    - uses: canonical/setup-lxd@e38f436c468900dfe2b6ca98fb8eb352bbbb917a  # alpha upstream: keep pinned
+      with:
+        channel: 5.21/stable
+    - name: Install tools
+      run: |
+        sudo apt-get update -y && sudo apt-get install -y sshpass
+        python3 -m venv "$RUNNER_TEMP/venv"
+        "$RUNNER_TEMP/venv/bin/pip" install -r requirements.txt
+        curl -fsSL -o "$RUNNER_TEMP/mihomo.gz" "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+        gunzip "$RUNNER_TEMP/mihomo.gz" && chmod +x "$RUNNER_TEMP/mihomo"
+      env:
+        MIHOMO_VERSION: v1.19.33
+    - name: LXC tool + deployer + 3X-UI + real client traffic
+      run: sudo env "MIHOMO=$RUNNER_TEMP/mihomo" "PATH=$PATH:/snap/bin" bash tests/e2e/run_stack.sh "$PWD/lxc-skill" "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/stack"

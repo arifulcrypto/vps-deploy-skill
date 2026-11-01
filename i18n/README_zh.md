@@ -65,3 +65,13 @@ ruff check scripts tests && pytest -q
 ## 许可证
 
 MIT，详见 [LICENSE](../LICENSE)。
+
+## 近期行为更新
+
+- `unified` 且未配置域名时，REALITY 默认使用空闲的 443 端口，已部署节点保留原端口。
+- `reality-self` 可通过 `--cdn-domain` 让 REALITY、Cloudflare WebSocket 和网站共用同一个 HTTPS 端口。
+- 面板公开时默认发布 3X-UI 内置订阅（`--no-sub` 关闭），自签 Hysteria 2 的证书固定值不包含在内置订阅中。
+- `--extra-protocols vmess,trojan` 按需开启兼容协议；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口路由尚未实现。
+- 激活失败时恢复之前的面板数据库，`state.json` 只记录最后一次验证通过的部署。
+- 配合 vps-lxc-skill 时使用 `--from-lxc result.json --container <名称>`。
+- Hysteria 2 默认不再声明带宽（使用 BBR），`--hy2-up` 与 `--hy2-down` 同时设置时才使用 Brutal。

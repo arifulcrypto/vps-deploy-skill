@@ -20,6 +20,7 @@ LABELS = {
         "ssh": "SSH", "panel": "3X-UI panel", "panel_user": "Panel user", "panel_pass": "Panel password",
         "panel_private": "Private (loopback only). Open an SSH tunnel first:",
         "panel_public": "Public HTTPS on a dedicated panel domain",
+        "subscription": "Subscription", "subscription_clash": "Clash subscription",
         "s_nodes": "2. Client Nodes", "link": "Link", "qr": "Terminal QR",
         "s_subs": "3. Online Subscription Converters (opt-in, credentials are sent to these services)",
         "s_files": "4. Local Files (owner-only permissions)", "s_notes": "5. Notes",
@@ -32,6 +33,7 @@ LABELS = {
         "ssh": "SSH", "panel": "3X-UI 面板", "panel_user": "面板用户", "panel_pass": "面板密码",
         "panel_private": "仅本机监听（不对公网开放）。请先建立 SSH 隧道：",
         "panel_public": "独立面板域名 HTTPS 公网访问",
+        "subscription": "订阅地址", "subscription_clash": "Clash 订阅地址",
         "s_nodes": "二、客户端节点", "link": "链接", "qr": "终端二维码",
         "s_subs": "三、在线订阅转换（需显式开启，节点凭据会发送给第三方服务）",
         "s_files": "四、本地文件（仅属主可读写）", "s_notes": "五、说明",
@@ -60,6 +62,12 @@ def render_report(ctx: Dict[str, Any], lang: str = "en") -> str:
         out.append(f"{'':<16}  {L['panel_public']}")
     else:
         out += [f"{'':<16}  {L['panel_private']}", f"{'':<16}  {p['tunnel']}"]
+
+    sub = ctx.get("subscription") or {}
+    if sub.get("url"):
+        out.append(f"{L['subscription']:<16}: {sub['url']}")
+    if sub.get("clash_url"):
+        out.append(f"{L['subscription_clash']:<16}: {sub['clash_url']}")
 
     out += ["", RULE, L["s_nodes"], RULE]
     for node in ctx["nodes"]:
