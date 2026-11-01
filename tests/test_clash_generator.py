@@ -140,3 +140,16 @@ def test_alternate_https_ports_never_use_443_only_clean_ips(isp):
 
 def test_port_443_keeps_the_carrier_list():
     assert clean_ips_for("unicom", 443) == CARRIER_CLEAN_IPS["unicom"]
+
+
+def test_merge_keeps_metered_nodes_out_of_automatic_groups(tmp_path):
+    from scripts.merge_clash import collect
+    direct = tmp_path / "a.yaml"
+    metered = tmp_path / "b.yaml"
+    direct.write_text(yaml.safe_dump({"proxies": [{"name": "jp", "type": "socks5", "server": "s", "port": 1}]}))
+    metered.write_text(yaml.safe_dump({"proxies": [{"name": "us", "type": "socks5", "server": "s", "port": 2}]}))
+    groups = group_map(generate_local_clash_yaml(collect([(str(direct), "direct"), (str(metered), "residential")])))
+    assert groups["⚡ Auto (latency)"]["proxies"] == ["jp"]
+    assert_acyclic(groups)
+    with pytest.raises(ValueError, match="duplicate node name"):
+        collect([(str(direct), "direct"), (str(direct), "relay")])

@@ -389,3 +389,17 @@ def test_failed_activation_installs_no_boot_check(tmp_path, fake_remote_factory)
     with pytest.raises(DeploymentError):
         deploy_vps(cfg(tmp_path), remote=remote)
     assert "boot self-check" not in called(remote)
+
+
+def test_exit_all_makes_every_node_metered_without_an_extra_port(tmp_path, fake_remote_factory):
+    remote = fake_remote_factory(responses())
+    result = deploy_vps(cfg(tmp_path, exit_proxy={"server": "203.0.113.5", "port": 824, "username": "u", "password": "p"},
+                            exit_all=True, online_sub=False), remote=remote)
+    assert {n["route"] for n in result["nodes"]} == {"residential"}
+    assert "srv-exit" not in [n["name"] for n in result["nodes"]]
+    assert json.loads([p for n, p in remote.calls if n == "inbound configuration"][0])["exit_all"] is True
+
+
+def test_reality_links_carry_the_mihomo_key_exchange_option(tmp_path, fake_remote_factory):
+    result = deploy_vps(cfg(tmp_path, online_sub=False), remote=fake_remote_factory(responses()))
+    assert "support-x25519mlkem768=true" in result["nodes"][0]["uri"]

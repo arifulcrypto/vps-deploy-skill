@@ -287,9 +287,11 @@ def reality_inbound(identity, port: int, target: str, server_names: List[str], p
 
 def build_db_payload(identity: Dict[str, str], inbounds: List[Dict[str, Any]], settings: Dict[str, str],
                      db_path: str = DEFAULT_DB_PATH, backup: bool = True,
-                     outbound: Optional[Dict[str, Any]] = None, xray_config: str = DEFAULT_XRAY_CONFIG) -> Dict[str, Any]:
+                     outbound: Optional[Dict[str, Any]] = None, xray_config: str = DEFAULT_XRAY_CONFIG,
+                     exit_all: bool = False) -> Dict[str, Any]:
     return {
         "outbound": outbound,
+        "exit_all": exit_all,
         "xray_config": xray_config,
         "db_path": db_path,
         "tag_prefix": TAG_PREFIX,
@@ -394,7 +396,7 @@ def insert_row(table, values):
     return c.lastrowid
 
 
-def update_template(outbound):
+def update_template(outbound, exit_all):
     """Add or remove the skill's outbound and rule. The rest of the panel's template stays as it is."""
     tag = prefix + "exit"
     row = c.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig'").fetchone()
@@ -409,10 +411,17 @@ def update_template(outbound):
         return
     outbounds = [o for o in template.get("outbounds", []) if o.get("tag") != tag]
     routing = template.setdefault("routing", {})
-    rules = [r for r in routing.get("rules", []) if r.get("outboundTag") != tag]
+    ours = [prefix + "exit-udp", tag]
+    rules = [r for r in routing.get("rules", []) if r.get("outboundTag") != tag and r.get("ruleTag") not in ours]
     if outbound:
         outbounds.append(outbound)
-        rules.append({"type": "field", "inboundTag": [tag], "outboundTag": tag})
+        tags = sorted({spec["tag"] for spec in cfg["inbounds"]}) if exit_all else [tag]
+        if exit_all:
+            # Mobile and residential proxies carry TCP only. Blocking QUIC makes apps fall back
+            # to TCP through the proxy, so nothing leaks out through the VPS address.
+            rules.append({"type": "field", "ruleTag": prefix + "exit-udp", "inboundTag": tags, "network": "udp",
+                          "port": "443", "outboundTag": "blocked"})
+        rules.append({"type": "field", "inboundTag": tags, "outboundTag": tag})
     template["outbounds"] = outbounds
     routing["rules"] = rules
     set_setting("xrayTemplateConfig", json.dumps(template, indent=2))
@@ -435,7 +444,7 @@ try:
     c.execute("BEGIN")
     for key, value in cfg["settings"].items():
         set_setting(key, value)
-    update_template(cfg.get("outbound"))
+    update_template(cfg.get("outbound"), cfg.get("exit_all"))
 
     client_id = None
     if "clients" in tables:
