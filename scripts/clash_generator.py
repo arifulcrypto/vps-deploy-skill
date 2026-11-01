@@ -33,6 +33,10 @@ GROUP_NAMES = {
     },
 }
 PROBE_URL = "https://www.gstatic.com/generate_204"
+CN_DNS = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"]
+REMOTE_DNS = ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"]
+GEO_BASE = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release"
+# Minimum client: Mihomo v1.19.9 for REALITY with the Xray in 3X-UI v3.11.0 (v1.19.8 fails).
 
 
 def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Optional[str] = None,
@@ -124,20 +128,33 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
         "log-level": "info",
         "unified-delay": True,
         "tcp-concurrent": True,
-        "experimental": {
-            "ignore-resolve-fail": True,
+        "find-process-mode": "off",
+        "geodata-loader": "memconservative",
+        "geo-auto-update": True,
+        "geo-update-interval": 168,
+        "geox-url": {
+            "geoip": f"{GEO_BASE}/geoip.dat",
+            "geosite": f"{GEO_BASE}/geosite.dat",
+            "mmdb": f"{GEO_BASE}/country-lite.mmdb",
         },
-        "cfw-latency-url": PROBE_URL,
-        "cfw-latency-timeout": 8000,
         "external-controller": "127.0.0.1:9090",
+        "sniffer": {
+            "enable": True,
+            "sniff": {"HTTP": {"ports": [80, "8080-8880"]}, "TLS": {"ports": [443, 8443]}, "QUIC": {"ports": [443, 8443]}},
+        },
+        # Chinese domains resolve at home. Everything else stays on the proxy, so foreign
+        # lookups never reach a domestic resolver and add no local DNS delay.
         "dns": {
             "enable": True,
             "ipv6": False,
             "default-nameserver": ["223.5.5.5", "119.29.29.29"],
             "enhanced-mode": "fake-ip",
             "fake-ip-range": "198.18.0.1/16",
-            "nameserver": ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query"],
-            "fallback": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"],
+            "fake-ip-filter": ["*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com", "time.*.com", "ntp.*.com"],
+            "respect-rules": True,
+            "nameserver": REMOTE_DNS,
+            "proxy-server-nameserver": CN_DNS,
+            "nameserver-policy": {"geosite:cn,private": CN_DNS},
         },
         "proxies": proxies,
         "proxy-groups": groups,
@@ -163,7 +180,8 @@ def generate_local_clash_yaml(nodes: List[Dict[str, Any]], output_filepath: Opti
             f"DOMAIN-SUFFIX,claude.ai,{g['ai']}",
             f"DOMAIN-SUFFIX,gemini.google.com,{g['ai']}",
             "DOMAIN-SUFFIX,cn,DIRECT",
-            "GEOIP,CN,DIRECT",
+            "GEOSITE,cn,DIRECT",
+            "GEOIP,CN,DIRECT,no-resolve",
             f"MATCH,{g['main']}",
         ],
     }

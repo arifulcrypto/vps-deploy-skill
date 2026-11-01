@@ -13,7 +13,8 @@ HOST_IP="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
 deployer() { "$PY" "$ROOT/scripts/vps_deployer.py" --from-lxc "$LXC_OUT/result.json" --no-online-sub "$@"; }
 
 echo "::group::Provision containers"
-time python3 "$LXC_REPO/scripts/vps_lxc.py" --local --count 2 --memory 1024 --disk 10 --output-dir "$LXC_OUT"
+time python3 "$LXC_REPO/scripts/vps_lxc.py" --local --count 2 --memory 1024 --disk 10 --output-dir "$LXC_OUT" \
+    ${LXC_IMAGE:+--image "$LXC_IMAGE"}
 echo "::endgroup::"
 
 echo "::group::Test certificate for the second container"
@@ -44,6 +45,10 @@ echo "::endgroup::"
 echo "Real client traffic"
 "$PY" "$ROOT/tests/e2e/check_clients.py" "$WORK/c1/clash_config.yaml"
 "$PY" "$ROOT/tests/e2e/check_clients.py" "$WORK/c2/clash_config.yaml" "$HOST_IP"
+if [ -n "${MIHOMO_MIN:-}" ]; then
+    echo "Oldest supported client"
+    MIHOMO="$MIHOMO_MIN" "$PY" "$ROOT/tests/e2e/check_clients.py" "$WORK/c1/clash_config.yaml"
+fi
 
 echo "Website behind the shared port"
 curl -fsS -o /dev/null --max-time 10 --cacert "$PKI/ca.pem" --resolve "$DOMAIN:8443:$HOST_IP" "https://$DOMAIN:8443/"
@@ -64,6 +69,14 @@ for url in (sub["url"], sub["clash_url"]):
     with urllib.request.urlopen(url, timeout=10) as res:
         assert res.status == 200 and res.read()
 PY
+
+echo "Resource use after deployment (idle)"
+for c in vps-01 vps-02; do
+    lxc exec "$c" -- sh -c '. /etc/os-release; echo "$PRETTY_NAME"; free -m | sed -n 2p; ps -eo rss,comm --sort=-rss | sed -n 2,4p'
+    echo "Disk used: $(lxc query "/1.0/instances/$c/state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["disk"].get("root",{}).get("usage",0)//1048576)') MB"
+done
+du -sh /var/snap/lxd/common/lxd/storage-pools/default/containers/* 2>/dev/null || true
+ps -eo rss,comm --sort=-rss | grep -E 'lxd|dnsmasq' | head -5
 
 echo "Redeploy keeps links"
 cp "$WORK/c1/result.json" "$WORK/c1-first.json"

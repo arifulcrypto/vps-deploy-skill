@@ -38,6 +38,7 @@ Source of truth for every agent adapter (`claude/`, `openai/`, `gemini/`). The e
 | Profile | Description | Direct Protocols | CDN Protocols | Target Use Case |
 | :--- | :--- | :--- | :--- | :--- |
 | `unified` (default) / `legacy` | Complete protocol matrix in one subscription | VLESS-REALITY (Vision) + Hysteria 2 (UDP) | VLESS-WS-TLS on 443 + Carrier Clean IPs | BandwagonHost, RackNerd, Akile, VMISS, general VPS |
+| `vision-tls` | One port with a real certificate, for clients without REALITY | VLESS + TLS + Vision -> own Nginx site | None |
 | `reality-self` | Port 443 stealth website fallback | VLESS-REALITY (Vision) on 443 -> own Nginx site | None (single 443) | Operators wanting single public 443 port disguised as personal site |
 
 ## 3. Inputs
@@ -63,10 +64,14 @@ Ask for what is missing; never invent credentials.
 | `cert_mode`, `cf_token` | no | `http-01` | `dns-01` issues through Cloudflare for hosts without public port 80. Token via `CF_TOKEN` |
 | `extra_protocols`, `vmess_port`, `trojan_port` | no | none | `vmess`, `trojan`. Trojan needs `domain` |
 | `relays` | no | `[]` | `[{"name","server","port"}]`: REALITY node through an L4 relay. Set up the relay itself separately |
-| `residential` | no | `[]` | `[{"name","server","port","username","password"}]`: client-side SOCKS5 node. No server-side exit routing is configured |
+| `residential` | no | `[]` | `[{"name","server","port","username","password"}]`: client-side SOCKS5 node. For server-side exit use `exit_proxy` |
 | `enable_sub`, `sub_port` | no | `true`, `2096` | 3X-UI built-in subscription, published when the panel is public |
 | `hy2_up`, `hy2_down` | no | unset (BBR) | Client Mbps. Setting both selects Brutal, so use real link speeds |
-| `web_backend_port` | no | `8443` | `reality-self` loopback website port |
+| `web_backend_port` | no | `8443` | Loopback website port for `reality-self` and `vision-tls` |
+| `cdn_transport` | no | `both` for `reality-self`, otherwise `ws` | `ws`, `xhttp` or `both`. XHTTP uses `packet-up`, tested through real Cloudflare |
+| `manage_dns` | no | `false` | Create or update the Cloudflare records. Needs `cf_token` with `Zone: DNS: Edit`. Records it did not create are never changed |
+| `exit_proxy`, `exit_port` | no | none | `{"server","port","username","password","protocol"}`: adds a REALITY inbound whose traffic leaves the VPS through this SOCKS or HTTP proxy. Its node is treated as metered |
+| `hy2_masquerade` | no | `false` | `reality-self` with `hy2_obfs: false`: HTTP/3 visitors get the website |
 | `panel_user`, `panel_pass`, `node_pass` | no | generated | Passable via CLI `--panel-pass`, etc. |
 | `adopt_existing_panel` | no | `true` | Adopts pre-installed 3X-UI |
 | `stop_conflicting_services` | no | `true` | Stops conflicting web units on 80/443 |
@@ -78,7 +83,9 @@ With vps-lxc-skill, use `--from-lxc <result.json> --container <name>`, or pass t
 
 Cloudflare notes, measured on a live deployment: use SSL mode Full (strict). `162.159.x.x` clean IPs answer on 443 only, so deployments on other HTTPS ports use the `104.x` and `172.67.x` addresses automatically. With `dns-01`, acme.sh keeps the token on the target for renewals, so give it DNS edit rights on one zone only.
 
-Clients: Mihomo v1.18.9 fails REALITY against the Xray in 3X-UI v3.11.0. v1.19.33 is tested in CI.
+Clients: use Mihomo **v1.19.9 or newer**. v1.19.8 and older fail REALITY against the Xray in 3X-UI v3.11.0. v1.19.9 and v1.19.33 are tested in CI.
+
+Host setup: see [Host Requirements](https://github.com/arifulcrypto/vps-lxc-skill/blob/main/docs/host-requirements.md) for the recommended OS, machine sizes and network settings.
 
 ## 4. Runbook for agents
 

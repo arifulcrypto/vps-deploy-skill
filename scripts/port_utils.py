@@ -17,6 +17,8 @@ PORT_RANGES: Dict[str, Tuple[int, int]] = {
     "vmess": (11000, 11999),
     "trojan": (12000, 12999),
     "ws_backend": (13000, 13999),
+    "xhttp_backend": (14000, 14999),
+    "exit": (15000, 15999),
 }
 
 # Cloudflare officially supported secondary HTTPS ports (ideal for admin panels under CDN proxy)

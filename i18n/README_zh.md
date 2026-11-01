@@ -35,7 +35,7 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 
 | 参数 | 作用 |
 | :--- | :--- |
-| `--profile {unified,legacy,reality-self}` | 部署方案（默认 `unified`，`legacy` 为别名） |
+| `--profile {unified,legacy,reality-self,vision-tls}` | 部署方案（默认 `unified`，`legacy` 为别名） |
 | `--domain`、`--ipv6-domain`、`--panel-domain` | 域名（各方案的 DNS 模式见 SKILL） |
 | `--hy2 / --no-hy2` | 开关 Hysteria 2 |
 | `--ssh-key`、`--ssh-known-hosts` | 密钥登录；预置主机指纹，替代首次信任 |
@@ -70,8 +70,8 @@ MIT，详见 [LICENSE](../LICENSE)。
 
 - `unified` 且未配置域名时，REALITY 默认使用空闲的 443 端口，已部署节点保留原端口。
 - `reality-self` 可通过 `--cdn-domain` 让 REALITY、Cloudflare WebSocket 和网站共用同一个 HTTPS 端口。
-- 面板公开时默认发布 3X-UI 内置订阅（`--no-sub` 关闭），自签 Hysteria 2 的证书固定值不包含在内置订阅中。
-- `--extra-protocols vmess,trojan` 按需开启兼容协议；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口路由尚未实现。
+- 面板公开时默认发布 3X-UI 内置订阅（`--no-sub` 关闭）。
+- `--extra-protocols vmess,trojan` 按需开启兼容协议；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口请使用 `exit_proxy`。
 - 激活失败时恢复之前的面板数据库，`state.json` 只记录最后一次验证通过的部署。
 - 配合 vps-lxc-skill 时使用 `--from-lxc result.json --container <名称>`。
 - Hysteria 2 默认不再声明带宽（使用 BBR），`--hy2-up` 与 `--hy2-down` 同时设置时才使用 Brutal。

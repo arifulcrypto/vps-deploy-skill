@@ -129,3 +129,24 @@ def test_client_traffic_row_is_created_once_and_keeps_counters(xui_db):
     assert run_db_script(spec)[0] == 0
     conn = sqlite3.connect(xui_db)
     assert conn.execute("SELECT email, up, down FROM client_traffics").fetchall() == [(IDENTITY["email"], 5, 7)]
+
+
+def test_exit_outbound_is_added_once_and_keeps_the_template(xui_db, tmp_path):
+    template = {"inbounds": [{"tag": "api"}, {"tag": "inbound-1"}], "outbounds": [{"tag": "direct"}],
+                "routing": {"rules": [{"outboundTag": "blocked"}]}}
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(template))
+    outbound = {"tag": "vps-skill-exit", "protocol": "socks", "settings": {}}
+    spec = build_db_payload(IDENTITY, [], {}, db_path=xui_db, outbound=outbound, xray_config=str(config))
+    assert run_db_script(spec)[0] == 0
+    assert run_db_script(spec)[0] == 0
+    saved = json.loads(rows(xui_db, "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")[0][0])
+    assert [o["tag"] for o in saved["outbounds"]] == ["direct", "vps-skill-exit"]
+    assert [i["tag"] for i in saved["inbounds"]] == ["api"]
+    assert saved["routing"]["rules"][-1] == {"type": "field", "inboundTag": ["vps-skill-exit"], "outboundTag": "vps-skill-exit"}
+    assert len(saved["routing"]["rules"]) == 2
+
+    assert run_db_script(build_db_payload(IDENTITY, [], {}, db_path=xui_db))[0] == 0
+    saved = json.loads(rows(xui_db, "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")[0][0])
+    assert [o["tag"] for o in saved["outbounds"]] == ["direct"]
+    assert [r.get("outboundTag") for r in saved["routing"]["rules"]] == ["blocked"]

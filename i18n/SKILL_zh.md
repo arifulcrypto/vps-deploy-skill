@@ -69,7 +69,11 @@ description: >-
 - `unified` 且未配置域名时，REALITY 默认使用空闲的 443 端口，已部署节点保留原端口。
 - `reality-self` 可通过 `cdn_domain` 让 REALITY、Cloudflare WebSocket 和网站共用同一个 HTTPS 端口。
 - 面板公开时默认发布 3X-UI 内置订阅，自签 Hysteria 2 的证书固定值不包含在内置订阅中。
-- `extra_protocols` 按需开启 VMess、Trojan；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口路由尚未实现。
-- `cert_mode: dns-01` 通过 Cloudflare 签发证书，用于没有公网 80 端口的容器，尚未在真实 Cloudflare 上验证。
+- `extra_protocols` 按需开启 VMess、Trojan；`relays` 与 `residential` 添加客户端节点，服务器端住宅出口请使用 `exit_proxy`。
+- `cert_mode: dns-01` 通过 Cloudflare 签发证书，用于没有公网 80 端口的容器，已在真实 Cloudflare 上验证。
 - 面板登录探测默认只产生警告，`fail_closed` 开启后才会使部署失败。
 - Cloudflare 实测：SSL 模式请使用 Full (strict)。`162.159.x.x` 优选 IP 仅响应 443，其他 HTTPS 端口的部署会自动改用 `104.x` 和 `172.67.x` 地址。使用 `dns-01` 时 acme.sh 会把令牌保存在目标机上用于续期，请只授予单个域名的 DNS 编辑权限。
+- `cdn_transport` 可选 `ws`、`xhttp`、`both`，XHTTP 使用 `packet-up`，已通过真实 Cloudflare 验证。
+- `manage_dns` 自动创建或更新 Cloudflare 记录，只需 `Zone: DNS: Edit`，不会修改非本工具创建的记录。
+- `vision-tls` 方案为不支持 REALITY 的客户端提供 VLESS + TLS + Vision，并回落到本地网站。
+- Clash 配置改为分流 DNS：国内域名使用国内解析，其他域名经代理解析。客户端需要 Mihomo **v1.19.9 或更新版本**。

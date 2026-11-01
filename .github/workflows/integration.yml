@@ -14,6 +14,10 @@ jobs:
   stack:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu-minimal:24.04", "images:debian/12", "images:debian/13"]
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -30,7 +34,9 @@ jobs:
         "$RUNNER_TEMP/venv/bin/pip" install -r requirements.txt
         curl -fsSL -o "$RUNNER_TEMP/mihomo.gz" "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
         gunzip "$RUNNER_TEMP/mihomo.gz" && chmod +x "$RUNNER_TEMP/mihomo"
+        curl -fsSL -o "$RUNNER_TEMP/mihomo-min.gz" "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.9/mihomo-linux-amd64-compatible-v1.19.9.gz"
+        gunzip "$RUNNER_TEMP/mihomo-min.gz" && chmod +x "$RUNNER_TEMP/mihomo-min"
       env:
         MIHOMO_VERSION: v1.19.33
     - name: LXC tool + deployer + 3X-UI + real client traffic
-      run: sudo env "MIHOMO=$RUNNER_TEMP/mihomo" "PATH=$PATH:/snap/bin" bash tests/e2e/run_stack.sh "$PWD/lxc-skill" "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/stack"
+      run: sudo env "MIHOMO=$RUNNER_TEMP/mihomo" "MIHOMO_MIN=$RUNNER_TEMP/mihomo-min" "LXC_IMAGE=${{ matrix.image }}" "PATH=$PATH:/snap/bin" bash tests/e2e/run_stack.sh "$PWD/lxc-skill" "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/stack"
