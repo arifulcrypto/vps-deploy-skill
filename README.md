@@ -59,7 +59,7 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 
 | Flag | Purpose |
 | :--- | :--- |
-| `--profile {unified,legacy,reality-self}` | Deployment profile (default `unified`; `legacy` is an alias) |
+| `--profile {unified,legacy,reality-self,vision-tls}` | Deployment profile (default `unified`; `legacy` is an alias) |
 | `--domain`, `--ipv6-domain`, `--panel-domain` | Hostnames (see SKILL.md for DNS mode per profile) |
 | `--hy2 / --no-hy2` | Toggle Hysteria 2 |
 | `--ssh-key`, `--ssh-known-hosts` | Key authentication; pinned host key instead of trust-on-first-use |
@@ -72,7 +72,11 @@ VPS_SSH_PASS='...' python3 scripts/vps_deployer.py --config examples/input_reali
 | `--cdn-domain` | `reality-self`: Cloudflare hostname sharing the HTTPS port with REALITY and the website |
 | `--extra-protocols vmess,trojan` | Opt-in compatibility inbounds (`--vmess-port`, `--trojan-port`) |
 | `--https-port`, `--web-backend-port` | Public HTTPS port and the `reality-self` loopback website port |
-| `--cert-mode {http-01,dns-01}`, `CF_TOKEN` | DNS-01 through Cloudflare, for hosts without public port 80 (not yet tested with real Cloudflare) |
+| `--cert-mode {http-01,dns-01}`, `CF_TOKEN` | DNS-01 through Cloudflare, for hosts without public port 80 |
+| `--manage-dns` | Create or update Cloudflare records. Needs `Zone: DNS: Edit`; records it didn't create are never changed |
+| `--cdn-transport {ws,xhttp,both}` | CDN transport. `both` is the `reality-self` default |
+| `--exit-port`, `exit_proxy` in config | Send one inbound's traffic out through a residential SOCKS or HTTP proxy |
+| `--hy2-masquerade`, `--no-hy2-obfs` | Serve the website to HTTP/3 visitors on the Hysteria 2 port |
 | `--hy2-up`, `--hy2-down` | Client Mbps for Hysteria 2. Unset means BBR. Setting them selects Brutal |
 | `--from-lxc result.json --container <name>` | Take ports and access from vps-lxc-skill |
 

@@ -92,7 +92,8 @@
             "enum": [
               "unified",
               "legacy",
-              "reality-self"
+              "reality-self",
+              "vision-tls"
             ],
             "default": "unified"
           },
@@ -312,6 +313,55 @@
           "hy2_down": {
             "type": "integer",
             "description": "Client Mbps; set with hy2_up to use Brutal"
+          },
+          "cdn_transport": {
+            "type": "string",
+            "enum": [
+              "ws",
+              "xhttp",
+              "both"
+            ]
+          },
+          "manage_dns": {
+            "type": "boolean",
+            "default": false,
+            "description": "Create or update Cloudflare records; needs cf_token"
+          },
+          "exit_port": {
+            "type": "integer"
+          },
+          "hy2_masquerade": {
+            "type": "boolean",
+            "default": false
+          },
+          "exit_proxy": {
+            "type": "object",
+            "required": [
+              "server",
+              "port"
+            ],
+            "properties": {
+              "server": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "username": {
+                "type": "string"
+              },
+              "password": {
+                "type": "string"
+              },
+              "protocol": {
+                "type": "string",
+                "enum": [
+                  "socks",
+                  "http"
+                ],
+                "default": "socks"
+              }
+            }
           }
         }
       },
