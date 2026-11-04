@@ -160,3 +160,21 @@ Choose by what you need the exit to do.
 ```bash
 python3 scripts/merge_clash.py --output cluster.yaml c1.yaml:direct c2.yaml:residential c3.yaml:relay
 ```
+
+## Xray Compatibility & Client Group Ordering
+
+### 1. Xray Core Version Pinning for Mihomo / Clash Verge Rev
+- **Upstream Change**: Starting with Xray-core `v26.7.11`, upstream altered REALITY handshake/AEAD verification logic. Clients using Mihomo (Clash Meta / Clash Verge Rev) fail REALITY authentication (`REALITY Authentication: false`) against newer Xray cores.
+- **Universal Stable Release**: Deploy Xray-core `v26.6.27`. It fully supports the modern 3X-UI `tunnel` Inbound while maintaining 100% cryptographic compatibility with Mihomo and v2rayN.
+- **Vision Flow Override**: In 3X-UI deployments, `client_inbounds.flow_override` must be populated with `xtls-rprx-vision`. If empty, Xray omits client flow on restart, causing v2rayN to fail with `-1`.
+
+### 2. Dual-Exit & Fallback Architecture
+When relaying traffic to an external landing node (e.g. US ISP NAT via Realm):
+- Generate both the relayed link (`vless://...@RELAY_IP:RELAY_PORT...`) and the direct landing link (`vless://...@LANDING_IP:LANDING_PORT...`) as an unrelayed fallback.
+- Both endpoints should be documented in `vless_node.txt`, Base64 subscriptions, and Clash YAML.
+
+### 3. Clash Verge Rev UI Placement & Neutral Naming
+- In `proxy-groups:`, place `🚀 节点选择` at index 0 so it appears as the primary card in the Clash Verge Rev UI.
+- Set `⚡ 自动选择 (低延迟)` as the first option within `🚀 节点选择`.
+- Ensure acyclic group graphs without circular back-references from child groups (`AI与ChatGPT`, `外贸与TikTok`) to `🚀 节点选择`.
+- Enforce neutral naming conventions without sensitive ISP/carrier names in client profiles.

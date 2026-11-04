@@ -94,3 +94,10 @@ description: >-
 - DataImpulse 粘性会话用户名格式：`USER__cr.us;sessid.NAME;sessttl.1440`，最长 24 小时保持同一 IP，到期后客户端自动重连并获得新 IP。
 - 住宅节点是计费流量，绝不能放入自动测速组。
 - 多台服务器合并客户端配置：`python3 scripts/merge_clash.py --output cluster.yaml c1.yaml:direct c2.yaml:residential c3.yaml:relay`
+
+## Xray 兼容性与客户端策略组规范
+
+- **Xray-core 版本锁定 (兼容 Mihomo / Clash Verge Rev)**：Xray 上游自 `v26.7.11` 起调整了 REALITY 的握手与 AEAD 校验，导致 Mihomo 客户端出现 `REALITY authentication failed`。部署时推荐锁定稳定黄金版本 **`v26.6.27`**，既支持 3X-UI 的 `tunnel` Inbound，又保持与 Mihomo / Clash Verge 100% 的握手兼容。
+- **Vision 流控覆写**：3X-UI 数据库中 `client_inbounds.flow_override` 必须明确写入 `xtls-rprx-vision`，防止重启后 Xray 未能分配流控导致 v2rayN 客户端直接报 `-1`。
+- **双出口与容灾架构**：中继外部落地（如美国家宽/ISP）时，建议同时生成中继节点与直连备用节点（绕过中转），并同步归档至 Base64 订阅与客户端 YAML 中。
+- **Clash Verge Rev 策略组与展示**：`🚀 节点选择` 置于 `proxy-groups:` 首项（首张卡片），其组内首选默认节点设为 `⚡ 自动选择 (低延迟)`；采用中立规范命名，去除所有运营商敏感标识。

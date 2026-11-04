@@ -14,6 +14,7 @@ PENDING_STATE_FILE = f"{STATE_DIR}/state.pending.json"
 HY2_SELF_SIGNED_DIR = f"{STATE_DIR}/hy2"
 XUI_BIN = "/usr/local/x-ui/x-ui"
 XUI_INSTALL_URL = "https://raw.githubusercontent.com/MHSanaei/3x-ui/{ref}/install.sh"
+XRAY_COMPATIBLE_VERSION = "v26.6.27"
 
 # Processes that belong to a skill-managed 3X-UI installation
 OWNED_PROCESS_PREFIXES = ("x-ui", "xray-linux-")
@@ -294,6 +295,59 @@ fi
 {XUI_BIN} setting -port {int(panel_port)} >/dev/null
 {XUI_BIN} setting -webBasePath {q(base_path)} >/dev/null
 echo XUI_CONFIGURED=1
+"""
+
+
+def ensure_compatible_xray_script(target_version: str = XRAY_COMPATIBLE_VERSION) -> str:
+    """
+    Ensures the Xray-core installed inside 3X-UI is pinned to a release that
+    is cryptographically compatible with Mihomo / Clash Meta REALITY handshakes.
+    Upstream Xray versions >= v26.7.0 introduced breaking modifications to REALITY
+    handshake AEAD verification; v26.6.27 supports the 3X-UI 'tunnel' Inbound while
+    maintaining 100% successful authentication with Mihomo/Clash Verge Rev.
+    """
+    return f"""
+set -e
+XRAY_BIN=""
+for candidate in /usr/local/x-ui/bin/xray-linux-* /usr/local/x-ui/bin/xray /usr/bin/xray /usr/local/bin/xray; do
+    if [ -x "$candidate" ]; then
+        XRAY_BIN="$candidate"
+        break
+    fi
+done
+if [ -n "$XRAY_BIN" ]; then
+    CURRENT_VER=$("$XRAY_BIN" version 2>/dev/null | head -n 1 | awk '{{print $2}}')
+    NEED_PIN=0
+    case "$CURRENT_VER" in
+        26.7*|26.8*|26.9*|26.10*|26.11*|26.12*|27.*|28.*)
+            NEED_PIN=1
+            ;;
+    esac
+    if [ "$NEED_PIN" = "1" ]; then
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64) XRAY_ARCH="64" ;;
+            aarch64|arm64) XRAY_ARCH="arm64-v8a" ;;
+            armv7l) XRAY_ARCH="arm32-v7a" ;;
+            *) XRAY_ARCH="64" ;;
+        esac
+        ZIP_URL="https://github.com/XTLS/Xray-core/releases/download/{q(target_version)}/Xray-linux-${{XRAY_ARCH}}.zip"
+        TMP_DIR=$(mktemp -d)
+        if curl -fsSL "$ZIP_URL" -o "$TMP_DIR/xray.zip"; then
+            unzip -q -o "$TMP_DIR/xray.zip" xray -d "$TMP_DIR/" 2>/dev/null || unzip -q -o "$TMP_DIR/xray.zip" -d "$TMP_DIR/"
+            if [ -f "$TMP_DIR/xray" ]; then
+                systemctl stop x-ui 2>/dev/null || true
+                cp -f "$TMP_DIR/xray" "$XRAY_BIN"
+                chmod +x "$XRAY_BIN"
+                systemctl start x-ui 2>/dev/null || true
+                echo "XRAY_PINNED={q(target_version)}"
+            fi
+        fi
+        rm -rf "$TMP_DIR"
+    else
+        echo "XRAY_VERSION_OK=$CURRENT_VER"
+    fi
+fi
 """
 
 

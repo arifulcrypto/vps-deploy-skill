@@ -754,6 +754,7 @@ def deploy_vps(cfg: Dict[str, Any], dry_run: bool = False, remote=None) -> Dict[
     remote.run_script("3X-UI installation", provision.xui_install_script(
         s["panel_user"], s["panel_pass"], s["panel_port"], s["panel_base_path"],
         c["xui_version"], c["reinstall_xui"]), timeout=900)
+    remote.run_script("Xray compatibility check", provision.ensure_compatible_xray_script())
     if not s.get("reality_private_key") or not s.get("reality_public_key"):
         priv, pub = provision.parse_x25519(remote.run_script("REALITY key generation", provision.x25519_script()).stdout)
         if not priv or not pub:

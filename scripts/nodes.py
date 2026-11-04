@@ -214,11 +214,18 @@ def relay_reality_node(name: str, relay_server: str, relay_port: int,
     clash["name"] = name
     clash["server"] = relay_server
     clash["port"] = relay_port
+    if "reality-opts" in clash:
+        clash["reality-opts"] = dict(clash["reality-opts"], support_x25519mlkem768=True)
+        # Clash format uses hyphen
+        clash["reality-opts"]["support-x25519mlkem768"] = True
+        clash["reality-opts"].pop("support_x25519mlkem768", None)
 
     orig_uri = original_node.get("uri", "")
     uuid = orig_clash.get("uuid", "")
     if "?" in orig_uri:
         query = orig_uri.split("?", 1)[1].split("#", 1)[0]
+        if "support-x25519mlkem768" not in query:
+            query += ("&" if query else "") + "support-x25519mlkem768=true"
     else:
         reality_opts = orig_clash.get("reality-opts", {})
         params = {
@@ -230,6 +237,7 @@ def relay_reality_node(name: str, relay_server: str, relay_port: int,
             "pbk": reality_opts.get("public-key", ""),
             "sid": reality_opts.get("short-id", ""),
             "type": "tcp",
+            "support-x25519mlkem768": "true",
         }
         query = urlencode(params)
 

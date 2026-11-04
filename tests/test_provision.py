@@ -21,6 +21,7 @@ def bash_syntax_ok(script):
                           webroot="/var/www/acme", email="ops@example.com"),
     provision.hy2_self_signed_script("198.51.100.1"),
     provision.xui_install_script("user", "p'a\"ss$(id)`x`", 50000, "/abc/", "v3.11.0"),
+    provision.ensure_compatible_xray_script(),
     provision.x25519_script(),
     provision.verify_listeners_script([443, 50000], [30000]),
     web_profile.nginx_apply_script(web_profile.render_nginx_conf(["www.example.com"], 8443, "1.26.0", "/c", "/k"),

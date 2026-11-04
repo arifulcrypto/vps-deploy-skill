@@ -22,3 +22,5 @@ wheels/
 output/
 .env
 .DS_Store
+*_vps_info.txt
+examples/softbank_c1.json
