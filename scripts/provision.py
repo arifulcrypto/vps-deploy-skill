@@ -331,6 +331,9 @@ if [ -n "$XRAY_BIN" ]; then
             armv7l) XRAY_ARCH="arm32-v7a" ;;
             *) XRAY_ARCH="64" ;;
         esac
+        if ! command -v unzip >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq unzip >/dev/null 2>&1 || true
+        fi
         ZIP_URL="https://github.com/XTLS/Xray-core/releases/download/{q(target_version)}/Xray-linux-${{XRAY_ARCH}}.zip"
         TMP_DIR=$(mktemp -d)
         if curl -fsSL "$ZIP_URL" -o "$TMP_DIR/xray.zip"; then
